@@ -13,7 +13,7 @@ export function calculateFinancialEligibility(financials = [], rules = {}, verif
   const checks = [];
   let status = "not_applicable";
   if (minAverage != null || minSingle != null) {
-    if (average == null && minAverage != null) {
+    if (selected.length < yearsRequired) {
       status = "insufficient_evidence";
       checks.push(`Need ${yearsRequired} verified turnover years; only ${selected.length} qualifying verified records are linked to evidence.`);
     } else {
