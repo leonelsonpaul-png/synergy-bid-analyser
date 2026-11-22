@@ -116,19 +116,34 @@ function App() {
   }
 
   async function uploadTenderFiles(fileList, tender = selected) {
-    const files = Array.from(fileList || []); if (!files.length || !tender) return; setUploading(true);
+    const files = Array.from(fileList || []);
+    if (!files.length || !tender) { notify('No file was selected or the tender record is unavailable.'); return 0; }
+    setUploading(true);
     let succeeded = 0;
-    for (const file of files) {
-      if (/\.doc$/i.test(file.name)) { notify(`Legacy .doc files are not supported. Please convert ${file.name} to PDF or DOCX.`); continue; }
-      const path = `${user.id}/tenders/${tender.id}/${crypto.randomUUID()}-${file.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
-      const { error: upError } = await supabase.storage.from('synergy-tender-documents').upload(path, file, { upsert: false });
-      if (upError) { notify(`Upload failed for ${file.name}: ${upError.message}`); continue; }
-      const type = classifyDocument(file.name);
-      const { error } = await supabase.from('tender_files').insert({ tender_id: tender.id, document_type: type, original_filename: file.name, storage_path: path, mime_type: file.type || null, extraction_status: 'pending' });
-      if (error) notify(`File stored but tender file record failed: ${error.message}`); else succeeded++;
+    const failures = [];
+    try {
+      for (const file of files) {
+        if (/\.doc$/i.test(file.name)) { failures.push(`${file.name}: legacy .doc format is not supported`); continue; }
+        const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+        const path = `${user.id}/tenders/${tender.id}/${crypto.randomUUID()}-${safeName}`;
+        const { error: upError } = await supabase.storage.from('synergy-tender-documents').upload(path, file, { upsert: false, contentType: file.type || 'application/octet-stream' });
+        if (upError) { failures.push(`${file.name}: storage upload failed — ${upError.message}`); continue; }
+        const { error } = await supabase.from('tender_files').insert({ tender_id: tender.id, document_type: classifyDocument(file.name), original_filename: file.name, storage_path: path, mime_type: file.type || null, extraction_status: 'pending' });
+        if (error) failures.push(`${file.name}: uploaded to storage but document record failed — ${error.message}`);
+        else succeeded++;
+      }
+      const { data: filesNow, error: listError } = await supabase.from('tender_files').select('*').eq('tender_id', tender.id).order('created_at');
+      if (listError) failures.push(`Could not refresh the document list — ${listError.message}`);
+      else setTenderFiles(filesNow || []);
+      if (failures.length) notify(`Attached ${succeeded} of ${files.length} file(s). ${failures[0]}`);
+      else notify(`${succeeded} tender document(s) attached.`);
+      return succeeded;
+    } catch (err) {
+      notify(`Upload error: ${err?.message || String(err)}`);
+      return succeeded;
+    } finally {
+      setUploading(false);
     }
-    const { data: filesNow } = await supabase.from('tender_files').select('*').eq('tender_id', tender.id).order('created_at');
-    setTenderFiles(filesNow || []); setUploading(false); notify(`${succeeded} tender document(s) attached.`); return succeeded;
   }
 
   async function runAnalysis(tender = selected) {
@@ -173,22 +188,36 @@ function App() {
 
   async function createTenderFromUploads(fileList) {
     const files = Array.from(fileList || []);
-    if (!files.length) return;
+    if (!files.length) { notify('No file was selected. Please choose your GeM PDF again.'); return; }
+    const rejected = files.filter(file => /\.doc$/i.test(file.name));
     const accepted = files.filter(file => !/\.doc$/i.test(file.name));
     if (!accepted.length) { notify('Please upload PDF, DOCX, XLS/XLSX, PNG or JPG files. Legacy .doc is not supported.'); return; }
-    const firstName = accepted[0].name.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').trim();
-    const { data, error } = await supabase.from('tenders').insert({
-      title: firstName || 'GeM bid assessment',
-      portal: 'GeM',
-      created_by: user.id,
-      status: 'uploaded'
-    }).select().single();
-    if (error) { notify(`Could not create assessment: ${error.message}`); return; }
-    await load();
-    setSelected(data); setPage('tender-detail'); setAnalysis(null); setCompliance([]); setTenderFiles([]);
-    const uploaded = await uploadTenderFiles(accepted, data);
-    if (uploaded > 0) await runAnalysis(data);
-    else notify('Tender record created, but no documents were uploaded successfully. Open the record and retry.');
+    setUploading(true);
+    notify(`Starting upload of ${accepted.length} document(s)…`);
+    try {
+      const firstName = accepted[0].name.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').trim();
+      const { data, error } = await supabase.from('tenders').insert({
+        title: firstName || 'GeM bid assessment',
+        portal: 'GeM',
+        created_by: user.id,
+        status: 'uploaded'
+      }).select().single();
+      if (error) throw new Error(`Could not create tender record: ${error.message}`);
+      setSelected(data); setPage('tender-detail'); setAnalysis(null); setCompliance([]); setTenderFiles([]);
+      setTenders(prev => [data, ...prev.filter(t => t.id !== data.id)]);
+      if (rejected.length) notify(`Tender created. Skipped unsupported .doc file: ${rejected[0].name}`);
+      const uploaded = await uploadTenderFiles(accepted, data);
+      if (uploaded > 0) {
+        await runAnalysis(data);
+        await load();
+      } else {
+        notify('Tender record created, but no documents were attached. Check the upload error above and retry from the tender workspace.');
+      }
+    } catch (err) {
+      notify(err?.message || 'Unexpected error while starting the GeM bid upload.');
+    } finally {
+      setUploading(false);
+    }
   }
 
   async function updateTender(patch) {
