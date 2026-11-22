@@ -62,7 +62,7 @@ export function extractTenderMetadataFallback(documents = []) {
   let submissionDeadline = null;
   if (deadlineMatch) {
     const [day, month, year, hour, minute] = deadlineMatch[1].match(/\d+/g).map(Number);
-    const parsed = new Date(Date.UTC(year, month - 1, day, hour, minute));
+    const parsed = new Date(Date.UTC(year, month - 1, day, hour, minute) - (5 * 60 + 30) * 60 * 1000);
     if (!Number.isNaN(parsed.getTime())) submissionDeadline = parsed.toISOString();
   }
   const entityMatch = text.match(/Ministry\/State Name\s+([^\n\r]+)/i);
