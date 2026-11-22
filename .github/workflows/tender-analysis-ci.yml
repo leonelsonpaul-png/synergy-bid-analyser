@@ -24,4 +24,4 @@ jobs:
         with:
           deno-version: v2.x
       - name: Type-check Supabase Edge Function
-        run: deno check --no-lock supabase/functions/tender-analysis/index.ts
+        run: deno check --config supabase/functions/tender-analysis/deno.json --no-lock supabase/functions/tender-analysis/index.ts
