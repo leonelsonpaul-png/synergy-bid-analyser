@@ -13,9 +13,9 @@ export function calculateFinancialEligibility(financials = [], rules = {}, verif
   const checks = [];
   let status = "not_applicable";
   if (minAverage != null || minSingle != null) {
-    if (selected.length < yearsRequired) {
+    if ((minAverage != null && average == null) || (minSingle != null && selected.length === 0)) {
       status = "insufficient_evidence";
-      checks.push(`Need ${yearsRequired} verified turnover years; only ${selected.length} qualifying verified records are linked to evidence.`);
+      checks.push(`Need ${minAverage != null ? yearsRequired + " verified turnover years" : "at least one verified turnover year"}; only ${selected.length} qualifying verified records are linked to evidence.`);
     } else {
       const averagePass = minAverage == null || average >= minAverage;
       const singlePass = minSingle == null || selected.some((item) => Number(item.turnover_inr) >= minSingle);
