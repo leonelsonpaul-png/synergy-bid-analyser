@@ -128,7 +128,7 @@ function App() {
       if (error) notify(`File stored but tender file record failed: ${error.message}`); else succeeded++;
     }
     const { data: filesNow } = await supabase.from('tender_files').select('*').eq('tender_id', tender.id).order('created_at');
-    setTenderFiles(filesNow || []); setUploading(false); notify(`${succeeded} tender document(s) attached. Run AI assessment when the complete bid package is ready.`);
+    setTenderFiles(filesNow || []); setUploading(false); notify(`${succeeded} tender document(s) attached.`); return succeeded;
   }
 
   async function runAnalysis(tender = selected) {
@@ -171,6 +171,26 @@ function App() {
     setModal(false); await load(); await openTender(data); notify('Tender created. Attach the complete bid package to continue.');
   }
 
+  async function createTenderFromUploads(fileList) {
+    const files = Array.from(fileList || []);
+    if (!files.length) return;
+    const accepted = files.filter(file => !/\.doc$/i.test(file.name));
+    if (!accepted.length) { notify('Please upload PDF, DOCX, XLS/XLSX, PNG or JPG files. Legacy .doc is not supported.'); return; }
+    const firstName = accepted[0].name.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').trim();
+    const { data, error } = await supabase.from('tenders').insert({
+      title: firstName || 'GeM bid assessment',
+      portal: 'GeM',
+      created_by: user.id,
+      status: 'uploaded'
+    }).select().single();
+    if (error) { notify(`Could not create assessment: ${error.message}`); return; }
+    await load();
+    setSelected(data); setPage('tender-detail'); setAnalysis(null); setCompliance([]); setTenderFiles([]);
+    const uploaded = await uploadTenderFiles(accepted, data);
+    if (uploaded > 0) await runAnalysis(data);
+    else notify('Tender record created, but no documents were uploaded successfully. Open the record and retry.');
+  }
+
   async function updateTender(patch) {
     if (!selected) return; const { data, error } = await supabase.from('tenders').update(patch).eq('id', selected.id).select().single();
     if (error) { notify(error.message); return; } setSelected(data); setTenders(prev => prev.map(t => t.id === data.id ? data : t)); notify('Tender record updated.');
@@ -195,8 +215,8 @@ function App() {
         <div className="grid-two"><section className="panel"><div className="panel-head"><div><h3>Recent tenders</h3><p>Latest uploaded opportunities</p></div><button className="text-btn" onClick={()=>setPage('history')}>View history <ChevronRight size={15}/></button></div><TenderTable rows={tenders.slice(0,6)} onOpen={openTender}/></section>
           <section className="panel"><div className="panel-head"><div><h3>Company readiness</h3><p>Permanent bidder profile</p></div><button className="text-btn" onClick={()=>setPage('company')}>Open profile <ChevronRight size={15}/></button></div><div className="readiness"><div className="readiness-icon"><Building2/></div><div><b>{profile?.company_name || 'Synergy Global Private Limited'}</b><p>Turnover records loaded · verification pending</p></div></div>{financials.map(f=><div className="financial-line" key={f.id}><span>{f.financial_year}</span><b>{money(f.turnover_inr)}</b><em>{f.verification_status==='verified'?'Verified':'Proof pending'}</em></div>)}<div className="notice"><AlertTriangle size={17}/> Average of stored turnover figures: {money(avg)}. Upload audited statements and CA certificates before relying on these figures in a bid.</div></section></div>
       </>}
-      {page==='tenders' && <><div className="page-intro"><div><h3>Start a tender assessment</h3><p>Create a tender record, then attach the main bid, ATC, BOQ, annexures and corrigenda.</p></div><button className="primary" onClick={()=>setModal(true)}><Plus size={17}/> Create tender</button></div>
-        <section className="panel"><div className="upload-zone"><UploadCloud size={30}/><h3>Build a complete tender file</h3><p>Create a tender record first. You can then attach multiple documents in its workspace.</p><button className="primary" onClick={()=>setModal(true)}>Create tender record</button></div><div className="notice"><CircleHelp size={17}/> AI-powered document extraction, clause analysis, financial checks and report generation are connected to the secure analysis service. Uploads remain pending until you run an assessment.</div></section>
+      {page==='tenders' && <><div className="page-intro"><div><h3>Check whether Synergy qualifies for a GeM bid</h3><p>Upload the GeM bid PDF, ATC, BOQ, annexures and corrigenda. The system extracts the requirements and compares them with Synergy's company profile.</p></div><button className="secondary" onClick={()=>setModal(true)}><Plus size={16}/> Enter details manually</button></div>
+        <section className="panel"><div className="upload-zone"><UploadCloud size={32}/><h3>Upload GeM bid documents to start</h3><p>No need to enter tender details first. Select the main bid document and any ATC, BOQ, annexures or corrigenda together.</p><label className={`primary upload-btn ${uploading||analysing?'disabled':''}`}>{uploading?'Uploading documents…':analysing?'Analysing bid…':'Upload documents & analyse'}<input type="file" multiple accept={fileAccept} disabled={uploading||analysing} onChange={e=>{const files=e.target.files; e.target.value=''; createTenderFromUploads(files);}}/></label><p style={{marginTop:12}}>Supported: PDF, DOCX, XLS/XLSX, PNG and JPG · Legacy .doc files are not supported</p></div><div className="notice"><CircleHelp size={17}/> The system will create a tender record automatically, extract bid details, assess financial and technical conditions against Synergy's stored profile, and generate a clause-wise qualification report. Missing proof will be marked as insufficient evidence, not assumed compliant.</div></section>
         <section className="panel"><div className="panel-head"><div><h3>All tenders</h3><p>Every assessment remains in tender history</p></div><div className="searchbox"><Search size={16}/><input placeholder="Search tender or reference" value={query} onChange={e=>setQuery(e.target.value)}/></div></div><TenderTable rows={filtered} onOpen={openTender}/></section></>}
       {page==='company' && <><section className="panel"><div className="panel-head"><div><h3>Permanent bidder profile</h3><p>Reusable baseline for all future tender comparisons</p></div><span className="tag green">Fixed company profile</span></div><div className="profile-grid"><div><small>REGISTERED BIDDER NAME</small><b>{profile?.company_name || 'Synergy Global Private Limited'}</b></div><div><small>BUSINESS DOMAINS</small><b>{(profile?.business_domains || ['AV solutions','IT & technology']).join(' · ')}</b></div><div><small>PROFILE STATUS</small><b>Initial baseline – evidence completion pending</b></div></div><h4>Financial turnover records</h4><div className="table-wrap"><table><thead><tr><th>Financial year</th><th>Turnover</th><th>Evidence status</th></tr></thead><tbody>{financials.map(f=><tr key={f.id}><td>{f.financial_year}</td><td>{money(f.turnover_inr)}</td><td><span className={`tag ${f.verification_status==='verified'?'green':'amber'}`}>{f.verification_status.replaceAll('_',' ')}</span></td></tr>)}</tbody></table></div><div className="notice"><AlertTriangle size={17}/> Stored turnover values are user-provided, not independently verified. Do not treat them as audited proof until supporting documents are checked.</div></section>
         <section className="panel"><div className="panel-head"><div><h3>Company evidence repository</h3><p>Upload certificates once; reuse them in future bid assessments.</p></div><label className={`primary upload-btn ${uploading?'disabled':''}`}><UploadCloud size={16}/> {uploading?'Uploading…':'Upload evidence'}<input type="file" multiple accept={fileAccept} disabled={uploading} onChange={e=>uploadCompanyEvidence(e.target.files)}/></label></div><div className="evidence-list">{docs.length?docs.map(d=><div className="evidence-row evidence-review-row" key={d.id}><FileText/><div className="evidence-info"><b>{d.title}</b><small>{d.category} · Uploaded {date(d.created_at)}</small>{d.reviewed_at && <small>Reviewed {dateTime(d.reviewed_at)} · {d.reviewed_by || 'Administrator'}{d.review_notes ? ` · ${d.review_notes}` : ''}</small>}{evidenceAudit.filter(a=>a.entity_id===d.id).map(a=><small key={a.id}>Audit: {a.event_type.replaceAll('_',' ')} · {dateTime(a.created_at)} · {a.details?.reviewer_email || a.actor_id || 'Administrator'}{a.details?.notes ? ` · ${a.details.notes}` : ''}</small>)}</div><span className={`tag ${d.verification_status==='verified'?'green':d.verification_status==='rejected'?'red':'amber'}`}>{d.verification_status}</span><div className="evidence-actions">{d.verification_status!=='verified' && <button className="secondary" onClick={()=>reviewEvidence(d.id,'verified')}>Verify</button>}{d.verification_status!=='rejected' && <button className="secondary" onClick={()=>reviewEvidence(d.id,'rejected')}>Reject</button>}<button className="icon-btn" title="Download" onClick={()=>downloadPrivateFile(d.storage_path,d.original_filename)}><Download size={16}/></button></div></div>):<div className="empty">No company evidence uploaded yet.</div>}</div></section></>}
