@@ -60,7 +60,8 @@ async function extractDocument(apiKey: string, bytes: Uint8Array, filename: stri
   const ext = filename.toLowerCase().split(".").pop() || "";
   if (["docx"].includes(ext)) {
     const mammoth = await import("npm:mammoth@1.9.0");
-    const result = await mammoth.extractRawText({ arrayBuffer: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) });
+    const docxBuffer = new ArrayBuffer(bytes.byteLength); new Uint8Array(docxBuffer).set(bytes);
+    const result = await mammoth.extractRawText({ arrayBuffer: docxBuffer });
     const raw = cleanText(result.value, 90000);
     return { text: raw, pages: [], metadata: { method: "mammoth-docx", warnings: result.messages?.map((m: any) => m.message) || [] } };
   }
