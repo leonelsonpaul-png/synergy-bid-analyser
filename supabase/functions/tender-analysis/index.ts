@@ -3,6 +3,7 @@ import { createClient } from "npm:@supabase/supabase-js@2.57.0";
 import { PDFDocument, StandardFonts, rgb } from "npm:pdf-lib@1.17.1";
 import { calculateFinancialEligibility } from "../_shared/financial.js";
 import { determineVerdict, collectMissingEvidence, restoreTenderAfterFailure } from "../_shared/analysis_rules.js";
+import { resolveClausePageReferences, extractTenderMetadataFallback, detectMissingTenderAttachments } from "../_shared/source_validation.js";
 
 const allowedOrigins = (Deno.env.get("APP_ORIGIN") || "").split(",").map((value) => value.trim()).filter(Boolean);
 function corsHeaders(origin: string | null) {
@@ -262,14 +263,14 @@ Deno.serve(async (req: Request) => {
  "tender_metadata":{"title":string|null,"reference":string|null,"procuring_entity":string|null,"bid_value_inr":number|null,"emd_inr":number|null,"submission_deadline":string|null,"delivery_location":string|null},
  "executive_summary": string,
  "clauses": [{"clause_reference":string|null,"source_document":string,"page_number":number|null,"requirement":string,"requirement_type":"mandatory|scored|informational","category":"financial|technical|experience|OEM|certification|legal|EMD|turnover|other","status":"pass|fail|conditional|missing_evidence|not_applicable|clarification_required","synergy_evidence":string|null,"gap_or_risk":string|null,"recommended_action":string|null}],
- "financial_rules":{"required_average_turnover_inr":number|null,"required_single_year_turnover_inr":number|null,"turnover_years_required":number|null,"minimum_net_worth_inr":number|null,"emd_exemption_allowed":boolean|null,"financial_notes":string},
+ "financial_rules":{"required_average_turnover_inr":number|null,"required_single_year_turnover_inr":number|null,"turnover_years_required":number|null,"required_oem_average_turnover_inr":number|null,"oem_turnover_years_required":number|null,"oem_financial_records":[{"oem_name":string,"financial_year":string,"turnover_inr":number,"evidence_document_id":string}],"minimum_net_worth_inr":number|null,"emd_exemption_allowed":boolean|null,"financial_notes":string},
  "technical_summary":string,
  "risk_summary":string,
  "missing_evidence":[string],
  "action_checklist":[string],
  "source_coverage":{"documents_reviewed":number,"limitations":[string]}
 }
-For every mandatory eligibility clause, cite the exact source document and page number where possible. For DOCX, XLS/XLSX, TXT and CSV sources where printed page numbering cannot be preserved, set page_number null and identify the worksheet/section/paragraph in source_document or recommended_action; never invent a page. Use null if page cannot be established. Do not invent clause references, amounts or pages. Match requirements ONLY against evidence listed below; the company profile's missing/unverified list is not proof. Evidence documents are usable only because their database status is verified. Financial records marked user_provided, needs_review or expired are NOT verified turnover proof. For any requirement lacking verified evidence, set missing_evidence or clarification_required, never pass. For mandatory condition demonstrably not met, set fail. Distinguish a missing document from a confirmed failure. Financial turnover thresholds should be extracted as numeric INR values (convert lakh/crore correctly). If multiple bid documents conflict, flag the conflict and prefer the latest corrigendum only when its date/order is explicit.
+For every mandatory eligibility clause, cite the exact source document and physical PDF page number. The pages array supplied for each PDF is authoritative; never cite a page absent from that array. For each OEM turnover record, return a separate financial year, amount, OEM name and evidence_document_id matching a verified evidence ID. Never use Synergy bidder turnover as OEM turnover. If no verified OEM turnover proof is supplied, return an empty oem_financial_records array. For DOCX, XLS/XLSX, TXT and CSV sources where printed page numbering cannot be preserved, set page_number null and identify the worksheet/section/paragraph in source_document or recommended_action; never invent a page. Use null if page cannot be established. Do not invent clause references, amounts or pages. Match requirements ONLY against evidence listed below; the company profile's missing/unverified list is not proof. Evidence documents are usable only because their database status is verified. Financial records marked user_provided, needs_review or expired are NOT verified turnover proof. For any requirement lacking verified evidence, set missing_evidence or clarification_required, never pass. For mandatory condition demonstrably not met, set fail. Distinguish a missing document from a confirmed failure. Financial turnover thresholds should be extracted as numeric INR values (convert lakh/crore correctly). If multiple bid documents conflict, flag the conflict and prefer the latest corrigendum only when its date/order is explicit.
 TENDER METADATA: ${JSON.stringify({ title: tender.title, reference: tender.tender_reference, procuring_entity: tender.procuring_entity, bid_value_inr: tender.bid_value_inr, emd_inr: tender.emd_inr, submission_deadline: tender.submission_deadline })}
 COMPANY PROFILE: ${JSON.stringify({ company_name: profile?.company_name || "Synergy Global Private Limited", business_domains: profile?.business_domains || [], confirmed_facts: profileData.confirmed_facts || [], unverified_or_missing: profileData.unverified_or_missing || [] })}
 FINANCIAL RECORDS: ${JSON.stringify((financials || []).map((f: any) => ({ financial_year: f.financial_year, turnover_inr: f.turnover_inr, verification_status: f.verification_status, evidence_document_id: f.evidence_document_id })))}
@@ -277,17 +278,21 @@ VERIFIED COMPANY EVIDENCE: ${JSON.stringify(evidenceTexts)}
 TENDER DOCUMENT TEXT (page-numbered where extraction could determine it): ${JSON.stringify(tenderTexts).slice(0, 150000)}`;
     const ai = await openAIJson(apiKey, analysisPrompt);
     const extractedMetadata = ai.tender_metadata || {};
+    const fallbackMetadata = extractTenderMetadataFallback(tenderTexts);
     const metadataPatch: Record<string, unknown> = {};
     for (const [source, target] of [["title", "title"], ["reference", "tender_reference"], ["procuring_entity", "procuring_entity"], ["delivery_location", "delivery_location"]] as const) {
-      const value = typeof extractedMetadata[source] === "string" ? extractedMetadata[source].trim() : "";
+      const candidate = extractedMetadata[source] ?? (source === "reference" ? fallbackMetadata.reference : source === "title" ? fallbackMetadata.title : source === "procuring_entity" ? fallbackMetadata.procuring_entity : null);
+      const value = typeof candidate === "string" ? candidate.trim() : "";
       if (value) metadataPatch[target] = value.slice(0, 500);
     }
     for (const [source, target] of [["bid_value_inr", "bid_value_inr"], ["emd_inr", "emd_inr"]] as const) {
-      const value = Number(extractedMetadata[source]);
-      if (extractedMetadata[source] !== null && extractedMetadata[source] !== undefined && Number.isFinite(value) && value >= 0) metadataPatch[target] = value;
+      const candidate = extractedMetadata[source] ?? (source === "bid_value_inr" ? fallbackMetadata.bid_value_inr : fallbackMetadata.emd_inr);
+      const value = Number(candidate);
+      if (candidate !== null && candidate !== undefined && Number.isFinite(value) && value >= 0) metadataPatch[target] = value;
     }
-    if (typeof extractedMetadata.submission_deadline === "string" && extractedMetadata.submission_deadline.trim()) {
-      const deadline = new Date(extractedMetadata.submission_deadline);
+    const deadlineValue = extractedMetadata.submission_deadline || fallbackMetadata.submission_deadline;
+    if (typeof deadlineValue === "string" && deadlineValue.trim()) {
+      const deadline = new Date(deadlineValue);
       if (!Number.isNaN(deadline.getTime())) metadataPatch.submission_deadline = deadline.toISOString();
     }
     if (Object.keys(metadataPatch).length) {
@@ -295,9 +300,19 @@ TENDER DOCUMENT TEXT (page-numbered where extraction could determine it): ${JSON
     }
     const reportTender = { ...tender, ...metadataPatch };
     const rules = ai.financial_rules || {};
-    const financialResult = calculateFinancialEligibility(financials || [], rules, evidenceDocs.map((item: any) => item.id));
+    const verifiedEvidenceIds = evidenceDocs.map((item: any) => item.id);
+    const financialResult = calculateFinancialEligibility(financials || [], rules, verifiedEvidenceIds);
     const { yearsRequired, selected: latestVerified, average, minAverage: minAvg, minSingle, checks: financialChecks, status: financialStatus } = financialResult;
+    const oemRecords = (Array.isArray(rules.oem_financial_records) ? rules.oem_financial_records : [])
+      .filter((item: any) => verifiedEvidenceIds.includes(item.evidence_document_id) && item.oem_name && item.financial_year && Number(item.turnover_inr) > 0)
+      .map((item: any) => ({ ...item, verification_status: "verified" }));
+    const oemRules = { required_average_turnover_inr: rules.required_oem_average_turnover_inr ?? null, turnover_years_required: rules.oem_turnover_years_required || rules.turnover_years_required || 3 };
+    const oemFinancialResult = calculateFinancialEligibility(oemRecords, oemRules, verifiedEvidenceIds);
     const clauses = Array.isArray(ai.clauses) ? ai.clauses : [];
+    const validatedClauses = resolveClausePageReferences(clauses, tenderTexts);
+    clauses.splice(0, clauses.length, ...validatedClauses);
+    const missingAttachments = detectMissingTenderAttachments(tenderTexts);
+    for (const item of missingAttachments) clauses.push({ clause_reference: "Document package completeness", source_document: "Tender document package", page_number: null, requirement: item, requirement_type: "mandatory", category: "other", status: "missing_evidence", synergy_evidence: null, gap_or_risk: item, recommended_action: "Upload the referenced attachment and rerun the assessment." });
     if (financialStatus !== "not_applicable") clauses.push({
       clause_reference: "Financial turnover calculation", source_document: "Computed from verified company financial records", page_number: null,
       requirement: `Average turnover ${minAvg == null ? "not specified" : formatINR(minAvg)}; single-year threshold ${minSingle == null ? "not specified" : formatINR(minSingle)}; years required: ${yearsRequired}.`,
@@ -307,19 +322,28 @@ TENDER DOCUMENT TEXT (page-numbered where extraction could determine it): ${JSON
       gap_or_risk: financialChecks.join(" ") || null,
       recommended_action: financialStatus === "insufficient_evidence" ? "Upload and verify audited financial statements/CA certificates and link them to each financial year." : null,
     });
+    if (oemFinancialResult.status !== "not_applicable") clauses.push({
+      clause_reference: "OEM turnover calculation", source_document: "Computed only from verified OEM financial evidence", page_number: null,
+      requirement: `OEM average turnover ${formatINR(oemFinancialResult.minAverage)}; years required: ${oemFinancialResult.yearsRequired}. This is separate from bidder turnover.`,
+      requirement_type: "mandatory", category: "OEM",
+      status: oemFinancialResult.status === "pass" ? "pass" : oemFinancialResult.status === "fail" ? "fail" : "missing_evidence",
+      synergy_evidence: oemFinancialResult.average == null ? null : `Verified OEM average across ${oemFinancialResult.selected.length} years: ${formatINR(oemFinancialResult.average)}.`,
+      gap_or_risk: oemFinancialResult.checks.join(" ") || null,
+      recommended_action: oemFinancialResult.status === "insufficient_evidence" ? "Upload the offered product OEM audited financial statements or CA/Cost Accountant turnover certificate, verify it, and rerun the assessment." : null,
+    });
     const verdict = determineVerdict(clauses, financialStatus);
     const pageLimitations = tenderTexts.filter((item: any) => item.metadata?.page_references && item.metadata.page_references !== "available")
       .map((item: any) => `${item.filename}: ${item.metadata.location_hint || "source format does not preserve printed page numbers"}; use section/worksheet references instead of page citations.`);
     const pdfPageLimitations = tenderTexts.filter((item: any) => item.metadata?.method === "openai-pdf-vision-ocr" && !item.pages?.length)
       .map((item: any) => `${item.filename}: PDF extraction did not return per-page text; verify page citations against the original file.`);
-    const missing = collectMissingEvidence(ai.missing_evidence || [], [...financialChecks, ...pageLimitations, ...pdfPageLimitations, ...evidenceExtractionWarnings]);
+    const missing = collectMissingEvidence(ai.missing_evidence || [], [...financialChecks, ...oemFinancialResult.checks, ...missingAttachments, ...pageLimitations, ...pdfPageLimitations, ...evidenceExtractionWarnings]);
     const report = {
       tender: { id: reportTender.id, title: reportTender.title, tender_reference: reportTender.tender_reference, procuring_entity: reportTender.procuring_entity, bid_value_inr: reportTender.bid_value_inr },
       verdict, executive_summary: ai.executive_summary || "", clauses, missing_evidence: missing,
-      financial_assessment: { status: financialStatus, required_average_turnover_inr: minAvg, required_single_year_turnover_inr: minSingle, years_required: yearsRequired, verified_years_available: latestVerified.length, verified_average_turnover_inr: average, checks: financialChecks, explanation: financialChecks.join(" ") || "No turnover threshold was extracted or verified." },
+      financial_assessment: { status: financialStatus === "fail" || oemFinancialResult.status === "fail" ? "fail" : financialStatus === "insufficient_evidence" || oemFinancialResult.status === "insufficient_evidence" ? "insufficient_evidence" : financialStatus, explanation: [...financialChecks, ...oemFinancialResult.checks].join(" ") || "No turnover threshold was extracted or verified.", bidder: { status: financialStatus, required_average_turnover_inr: minAvg, required_single_year_turnover_inr: minSingle, years_required: yearsRequired, verified_years_available: latestVerified.length, verified_average_turnover_inr: average, selected_years: latestVerified.map((item: any) => ({ financial_year: item.financial_year, turnover_inr: Number(item.turnover_inr) })), checks: financialChecks }, oem: { status: oemFinancialResult.status, required_average_turnover_inr: oemFinancialResult.minAverage, years_required: oemFinancialResult.yearsRequired, verified_years_available: oemFinancialResult.selected.length, verified_average_turnover_inr: oemFinancialResult.average, oem_names: [...new Set(oemRecords.map((item: any) => item.oem_name))], selected_years: oemFinancialResult.selected.map((item: any) => ({ oem_name: item.oem_name, financial_year: item.financial_year, turnover_inr: Number(item.turnover_inr), evidence_document_id: item.evidence_document_id })), checks: oemFinancialResult.checks } },
       technical_assessment: { summary: ai.technical_summary || "", clauses: clauses.filter((c: any) => ["technical", "OEM", "certification", "experience"].includes(c.category)) },
       risk_assessment: { summary: ai.risk_summary || "", score: Math.min(100, clauses.filter((c: any) => ["fail", "missing_evidence", "clarification_required"].includes(statusFromClause(c))).length * 12) },
-      action_checklist: ai.action_checklist || [], source_coverage: ai.source_coverage || {},
+      action_checklist: ai.action_checklist || [], source_coverage: { ...(ai.source_coverage || {}), documents_uploaded: tenderTexts.map((item: any) => ({ filename: item.filename, document_type: item.document_type, page_count: item.metadata?.page_count || item.pages?.length || null })), missing_attachments: missingAttachments },
     };
     const { data: previous, error: previousError } = await adminClient.from("tender_analyses").select("version").eq("tender_id", tender.id).order("version", { ascending: false }).limit(1).maybeSingle();
     if (previousError) throw new Error(`Load previous analysis version: ${previousError.message}`);
@@ -329,7 +353,7 @@ TENDER DOCUMENT TEXT (page-numbered where extraction could determine it): ${JSON
       technical_assessment: report.technical_assessment, risk_assessment: report.risk_assessment,
       missing_evidence: missing, action_checklist: report.action_checklist,
       source_coverage: report.source_coverage, full_report: report, created_by: userId,
-      model_metadata: { model: OPENAI_MODEL, processed_files: tenderTexts.length, verified_evidence_documents: evidenceTexts.length },
+      model_metadata: { model: OPENAI_MODEL, processed_files: tenderTexts.length, verified_evidence_documents: evidenceTexts.length, page_citations_validated: true, oem_financial_records_used: oemRecords.length },
     }).select().single();
     if (insertError) throw insertError;
     const rows = clauses.map((c: any) => ({
