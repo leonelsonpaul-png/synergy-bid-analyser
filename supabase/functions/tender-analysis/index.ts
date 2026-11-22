@@ -199,7 +199,7 @@ Deno.serve(async (req: Request) => {
     const { data: tender, error: tenderError } = await adminClient.from("tenders").select("*").eq("id", body.tender_id).single();
     if (tenderError || !tender) return json({ error: "Tender not found." }, 404, origin);
     runningTenderId = tender.id;
-    previousTenderStatus = tender.status || "uploaded";
+    previousTenderStatus = tender.status === "analysing" ? "uploaded" : (tender.status || "uploaded");
     await checked(adminClient.from("tenders").update({ status: "analysing" }).eq("id", tender.id), "Mark tender as analysing");
 
     const { data: files, error: filesError } = await adminClient.from("tender_files").select("*").eq("tender_id", tender.id).order("created_at");
