@@ -96,7 +96,7 @@ function App() {
       supabase.from('tender_analyses').select('*').eq('tender_id', t.id).order('version', { ascending: false }).limit(1).maybeSingle()
     ]);
     if (files.error) notify(files.error.message); else setTenderFiles(files.data || []);
-    if (a.data) { setAnalysis(a.data); const { data: items, error } = await supabase.from('compliance_items').select('*').eq('analysis_id', a.data.id).order('created_at'); if (!error) setCompliance(items || []); }
+    if (a.data) { setAnalysis(a.data); if (a.data.report_storage_path) { const { data: signed } = await supabase.storage.from('synergy-tender-documents').createSignedUrl(a.data.report_storage_path, 600); setReportUrl(signed?.signedUrl || ''); } const { data: items, error } = await supabase.from('compliance_items').select('*').eq('analysis_id', a.data.id).order('created_at'); if (!error) setCompliance(items || []); }
   }
 
   async function uploadTenderFiles(fileList, tender = selected) {
@@ -119,7 +119,7 @@ function App() {
     const { data, error } = await supabase.functions.invoke('tender-analysis', { body: { action: 'analyze', tender_id: tender.id } });
     if (error || data?.error) { notify(data?.error || error.message || 'Analysis failed.'); setAnalysing(false); return; }
     setAnalysis({ id: data.analysis_id, verdict: data.verdict, executive_summary: data.executive_summary, financial_assessment: data.financial_assessment, report_storage_path: null });
-    setCompliance(data.clauses || []); setReportUrl(data.report_url || '');
+    const { data: savedClauses } = await supabase.from('compliance_items').select('*').eq('analysis_id', data.analysis_id).order('created_at'); setCompliance(savedClauses || []); setReportUrl(data.report_url || '');
     const { data: refreshed } = await supabase.from('tenders').select('*').eq('id', tender.id).single();
     if (refreshed) { setSelected(refreshed); setTenders(prev => prev.map(t => t.id === refreshed.id ? refreshed : t)); }
     const { data: latestFiles } = await supabase.from('tender_files').select('*').eq('tender_id', tender.id).order('created_at');
