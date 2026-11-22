@@ -55,10 +55,15 @@ test("ignores turnover rows whose linked certificate is not verified", () => {
   assert.equal(result.selected.length, 0);
 });
 
-test("single-year threshold requires the complete requested evidence period", () => {
+test("single-year threshold passes with one verified year when average is not required", () => {
   const result = calculateFinancialEligibility([row("FY 2025-26", 30_00_00_000)], { required_single_year_turnover_inr: 20_00_00_000, turnover_years_required: 3 }, ["proof-id"]);
-  assert.equal(result.status, "insufficient_evidence");
+  assert.equal(result.status, "pass");
   assert.equal(result.selected.length, 1);
+});
+
+test("single-year threshold reports insufficient evidence when no verified year exists", () => {
+  const result = calculateFinancialEligibility([row("FY 2025-26", 30_00_00_000, "user_provided", null)], { required_single_year_turnover_inr: 20_00_00_000, turnover_years_required: 3 }, []);
+  assert.equal(result.status, "insufficient_evidence");
 });
 
 test("checks average and single-year thresholds together", () => {
