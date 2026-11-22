@@ -227,7 +227,7 @@ VERIFIED COMPANY EVIDENCE: ${JSON.stringify(evidenceTexts)}
 TENDER DOCUMENT TEXT (page-numbered where extraction could determine it): ${JSON.stringify(tenderTexts).slice(0, 150000)}`;
     const ai = await openAIJson(apiKey, analysisPrompt);
     const rules = ai.financial_rules || {};
-    const financialResult = calculateFinancialEligibility(financials || [], rules);
+    const financialResult = calculateFinancialEligibility(financials || [], rules, evidenceDocs.map((item: any) => item.id));
     const { yearsRequired, selected: latestVerified, average, minAverage: minAvg, minSingle, checks: financialChecks, status: financialStatus } = financialResult;
     const clauses = Array.isArray(ai.clauses) ? ai.clauses : [];
     if (financialStatus !== "not_applicable") clauses.push({
