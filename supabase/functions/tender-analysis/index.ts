@@ -224,7 +224,7 @@ Deno.serve(async (req: Request) => {
           extraction_status: "completed", extracted_text: extracted.text, page_references: extracted.pages,
           page_count: extracted.metadata.page_count || extracted.pages.length || null, extraction_metadata: extracted.metadata,
         }).eq("id", file.id), `Save extraction for ${file.original_filename}`);
-        tenderTexts.push({ filename: file.original_filename, document_type: file.document_type, text: extracted.text, pages: extracted.pages });
+        tenderTexts.push({ filename: file.original_filename, document_type: file.document_type, text: extracted.text, pages: extracted.pages, metadata: extracted.metadata });
       } catch (err) {
         const failureWrite = await adminClient.from("tender_files").update({ extraction_status: "failed", extraction_metadata: { error: String(err) } }).eq("id", file.id);
         if (failureWrite.error) console.error("Could not persist extraction failure", file.id, failureWrite.error);
@@ -280,7 +280,11 @@ TENDER DOCUMENT TEXT (page-numbered where extraction could determine it): ${JSON
       recommended_action: financialStatus === "insufficient_evidence" ? "Upload and verify audited financial statements/CA certificates and link them to each financial year." : null,
     });
     const verdict = determineVerdict(clauses, financialStatus);
-    const missing = collectMissingEvidence(ai.missing_evidence || [], financialChecks);
+    const pageLimitations = tenderTexts.filter((item: any) => item.metadata?.page_references && item.metadata.page_references !== "available")
+      .map((item: any) => `${item.filename}: ${item.metadata.location_hint || "source format does not preserve printed page numbers"}; use section/worksheet references instead of page citations.`);
+    const pdfPageLimitations = tenderTexts.filter((item: any) => item.metadata?.method === "openai-pdf-vision-ocr" && !item.pages?.length)
+      .map((item: any) => `${item.filename}: PDF extraction did not return per-page text; verify page citations against the original file.`);
+    const missing = collectMissingEvidence(ai.missing_evidence || [], [...financialChecks, ...pageLimitations, ...pdfPageLimitations]);
     const report = {
       tender: { id: tender.id, title: tender.title, tender_reference: tender.tender_reference, procuring_entity: tender.procuring_entity, bid_value_inr: tender.bid_value_inr },
       verdict, executive_summary: ai.executive_summary || "", clauses, missing_evidence: missing,
@@ -316,13 +320,13 @@ TENDER DOCUMENT TEXT (page-numbered where extraction could determine it): ${JSON
     const { error: uploadError } = await adminClient.storage.from(BUCKET).upload(reportPath, pdfBytes, { contentType: "application/pdf", upsert: false });
     if (uploadError) throw uploadError;
     await checked(adminClient.from("tender_analyses").update({ report_storage_path: reportPath }).eq("id", analysis.id), "Save report path");
+    await checked(adminClient.from("audit_events").insert({ actor_id: userId, event_type: "tender_analysis_completed", entity_type: "tender", entity_id: tender.id, details: { analysis_id: analysis.id, verdict, version: analysis.version } }), "Write analysis audit event");
+    const { data: signed, error: signedError } = await adminClient.storage.from(BUCKET).createSignedUrl(reportPath, 60 * 10);
+    if (signedError) throw new Error(`Create private report URL: ${signedError.message}`);
     await checked(adminClient.from("tenders").update({
       status: verdict === "eligible" ? "go" : verdict === "eligible_with_conditions" ? "conditional_go" : verdict === "not_eligible" ? "no_go" : "analysis_ready",
       final_verdict: verdict, risk_score: report.risk_assessment.score, summary: { executive_summary: report.executive_summary, analysis_id: analysis.id },
     }).eq("id", tender.id), "Save final tender verdict");
-    await checked(adminClient.from("audit_events").insert({ actor_id: userId, event_type: "tender_analysis_completed", entity_type: "tender", entity_id: tender.id, details: { analysis_id: analysis.id, verdict, version: analysis.version } }), "Write analysis audit event");
-    const { data: signed, error: signedError } = await adminClient.storage.from(BUCKET).createSignedUrl(reportPath, 60 * 10);
-    if (signedError) throw new Error(`Create private report URL: ${signedError.message}`);
     runningTenderId = null;
     return json({ success: true, analysis_id: analysis.id, verdict, executive_summary: report.executive_summary, financial_assessment: report.financial_assessment, clauses: rows, missing_evidence: missing, report_url: signed?.signedUrl || null, report_filename: `Synergy-Tender-Assessment-${analysis.version}.pdf` }, 200, origin);
   } catch (error) {
