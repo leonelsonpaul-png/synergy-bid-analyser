@@ -1,6 +1,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.57.0";
 import { PDFDocument, StandardFonts, rgb } from "npm:pdf-lib@1.17.1";
+import { calculateFinancialEligibility } from "../_shared/financial.js";
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -226,25 +227,8 @@ VERIFIED COMPANY EVIDENCE: ${JSON.stringify(evidenceTexts)}
 TENDER DOCUMENT TEXT (page-numbered where extraction could determine it): ${JSON.stringify(tenderTexts).slice(0, 150000)}`;
     const ai = await openAIJson(apiKey, analysisPrompt);
     const rules = ai.financial_rules || {};
-    const verifiedFinancials = (financials || []).filter((f: any) => f.verification_status === "verified" && f.evidence_document_id);
-    const yearsRequired = Math.max(1, Math.min(5, Number(rules.turnover_years_required) || 3));
-    const latestVerified = verifiedFinancials.slice(0, yearsRequired);
-    const average = latestVerified.length === yearsRequired
-      ? latestVerified.reduce((sum: number, f: any) => sum + Number(f.turnover_inr || 0), 0) / yearsRequired : null;
-    const minAvg = rules.required_average_turnover_inr == null ? null : Number(rules.required_average_turnover_inr);
-    const minSingle = rules.required_single_year_turnover_inr == null ? null : Number(rules.required_single_year_turnover_inr);
-    const financialChecks: string[] = [];
-    let financialStatus = "not_applicable";
-    if (minAvg != null || minSingle != null) {
-      if (average == null && minAvg != null) { financialStatus = "insufficient_evidence"; financialChecks.push(`Need ${yearsRequired} verified turnover years; only ${latestVerified.length} qualifying verified records are linked to evidence.`); }
-      else {
-        const avgPass = minAvg == null || average! >= minAvg;
-        const singlePass = minSingle == null || latestVerified.some((f: any) => Number(f.turnover_inr) >= minSingle);
-        financialStatus = avgPass && singlePass ? "pass" : "fail";
-        if (!avgPass) financialChecks.push(`Verified average ${formatINR(average)} is below required ${formatINR(minAvg)}.`);
-        if (!singlePass) financialChecks.push(`No verified year meets single-year turnover ${formatINR(minSingle)}.`);
-      }
-    }
+    const financialResult = calculateFinancialEligibility(financials || [], rules);
+    const { yearsRequired, selected: latestVerified, average, minAverage: minAvg, minSingle, checks: financialChecks, status: financialStatus } = financialResult;
     const clauses = Array.isArray(ai.clauses) ? ai.clauses : [];
     if (financialStatus !== "not_applicable") clauses.push({
       clause_reference: "Financial turnover calculation", source_document: "Computed from verified company financial records", page_number: null,
