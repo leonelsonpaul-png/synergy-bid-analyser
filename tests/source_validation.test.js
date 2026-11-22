@@ -26,7 +26,7 @@ test("removes page citations that cannot be verified against extracted page text
 test("extracts GeM reference and deadline as fallback tender metadata", () => {
   const result = extractTenderMetadataFallback([{ text: "Bid Number GEM/2026/B/8212520\nBid End Date/Time 23-11-2026 18:00\nMinistry/State Name Ministry Of Earth Sciences\nDepartment Name India Meteorological Department (IMD)" }]);
   assert.equal(result.reference, "GEM/2026/B/8212520");
-  assert.equal(result.submission_deadline, "2026-11-23T18:00:00.000Z");
+  assert.equal(result.submission_deadline, "2026-11-23T12:30:00.000Z");
   assert.match(result.procuring_entity, /Ministry Of Earth Sciences/);
 });
 
