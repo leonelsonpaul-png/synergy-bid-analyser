@@ -3,13 +3,23 @@ import { createClient } from "npm:@supabase/supabase-js@2.57.0";
 import { PDFDocument, StandardFonts, rgb } from "npm:pdf-lib@1.17.1";
 import { calculateFinancialEligibility } from "../_shared/financial.js";
 
-const cors = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-};
-const json = (body: unknown, status = 200) =>
-  new Response(JSON.stringify(body), { status, headers: { ...cors, "Content-Type": "application/json" } });
+const allowedOrigins = (Deno.env.get("APP_ORIGIN") || "").split(",").map((value) => value.trim()).filter(Boolean);
+function corsHeaders(origin: string | null) {
+  const headers: Record<string, string> = {
+    "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Vary": "Origin",
+  };
+  if (origin && allowedOrigins.includes(origin)) headers["Access-Control-Allow-Origin"] = origin;
+  return headers;
+}
+const json = (body: unknown, status = 200, origin: string | null = null) =>
+  new Response(JSON.stringify(body), { status, headers: { ...corsHeaders(origin), "Content-Type": "application/json" } });
+async function checked<T>(operation: PromiseLike<{ data: T; error: any }>, label: string): Promise<T> {
+  const result = await operation;
+  if (result.error) throw new Error(`${label}: ${result.error.message || String(result.error)}`);
+  return result.data;
+}
 const MAX_FILE_BYTES = 24 * 1024 * 1024;
 const BUCKET = "synergy-tender-documents";
 const OPENAI_MODEL = Deno.env.get("OPENAI_MODEL") || "gpt-4.1-mini";
@@ -63,14 +73,14 @@ async function extractDocument(apiKey: string, bytes: Uint8Array, filename: stri
     const docxBuffer = new ArrayBuffer(bytes.byteLength); new Uint8Array(docxBuffer).set(bytes);
     const result = await mammoth.extractRawText({ arrayBuffer: docxBuffer });
     const raw = cleanText(result.value, 90000);
-    return { text: raw, pages: [], metadata: { method: "mammoth-docx", warnings: result.messages?.map((m: any) => m.message) || [] } };
+    return { text: raw, pages: [], metadata: { method: "mammoth-docx", page_references: "unavailable_for_format", location_hint: "DOCX paragraph order; source pagination is not preserved by text extraction", warnings: result.messages?.map((m: any) => m.message) || [] } };
   }
   if (["xlsx", "xls"].includes(ext)) {
     const XLSX = await import("npm:xlsx@0.18.5");
     const workbook = XLSX.read(bytes, { type: "array" });
     const text = workbook.SheetNames.map((name: string) =>
       `SHEET: ${name}\n${XLSX.utils.sheet_to_csv(workbook.Sheets[name])}`).join("\n\n").slice(0, 90000);
-    return { text, pages: [], metadata: { method: "xlsx-sheet-extraction", sheets: workbook.SheetNames } };
+    return { text, pages: [], metadata: { method: "xlsx-sheet-extraction", page_references: "not_applicable_for_format", location_hint: "Worksheet names are retained; printed page numbering is not available", sheets: workbook.SheetNames } };
   }
   const dataUrl = `data:${mime || "application/octet-stream"};base64,${base64(bytes)}`;
   if (ext === "pdf" || mime === "application/pdf") {
@@ -87,7 +97,7 @@ async function extractDocument(apiKey: string, bytes: Uint8Array, filename: stri
     return { text: cleanText(result.document_text, 50000), pages: result.pages || [{ page_number: 1, text: result.document_text || "" }], metadata: { method: "openai-image-ocr", warnings: result.warnings || [] } };
   }
   if (mime.startsWith("text/") || ext === "txt" || ext === "csv") {
-    return { text: new TextDecoder().decode(bytes).slice(0, 90000), pages: [], metadata: { method: "plain-text" } };
+    return { text: new TextDecoder().decode(bytes).slice(0, 90000), pages: [], metadata: { method: "plain-text", page_references: "unavailable_for_format", location_hint: "Line/section references only; no stable page layout" } };
   }
   throw new Error(`Unsupported file type for extraction: ${filename}. Supported: PDF, DOCX, XLSX/XLS, PNG, JPG, TXT, CSV.`);
 }
@@ -143,8 +153,13 @@ async function makePdf(report: any) {
 }
 
 Deno.serve(async (req: Request) => {
-  if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
+  const origin = req.headers.get("Origin");
+  if (origin && !allowedOrigins.includes(origin)) return new Response("Origin not allowed.", { status: 403, headers: { "Vary": "Origin" } });
+  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders(origin) });
   if (req.method !== "POST") return json({ error: "POST required." }, 405);
+  let runningTenderId: string | null = null;
+  let previousTenderStatus: string | null = null;
+  let actorId: string | null = null;
   try {
     const authorization = req.headers.get("Authorization") || "";
     const token = authorization.replace(/^Bearer\s+/i, "");
@@ -155,40 +170,63 @@ Deno.serve(async (req: Request) => {
     const { data: authData, error: authError } = await adminClient.auth.getUser(token);
     if (authError || !authData.user) return json({ error: "Invalid or expired session." }, 401);
     const userId = authData.user.id;
+    actorId = userId;
     const { data: adminProfile, error: adminError } = await adminClient.from("admin_profiles")
       .select("user_id,is_active").eq("user_id", userId).eq("is_active", true).maybeSingle();
     if (adminError || !adminProfile) return json({ error: "Synergy administrator access required." }, 403);
+    const body = await req.json();
+    if (body.action === "review_evidence") {
+      const evidenceId = String(body.evidence_id || "");
+      const decision = String(body.decision || "");
+      if (!evidenceId || !["verified", "rejected"].includes(decision)) return json({ error: "Expected evidence_id and decision=verified|rejected." }, 400, origin);
+      const current = await checked(adminClient.from("evidence_documents").select("id,title,verification_status").eq("id", evidenceId).maybeSingle(), "Load evidence");
+      if (!current) return json({ error: "Evidence document not found." }, 404, origin);
+      const notes = cleanText(body.notes || "", 2000) || null;
+      const reviewedAt = new Date().toISOString();
+      await checked(adminClient.from("evidence_documents").update({ verification_status: decision, reviewed_by: userId, reviewed_at: reviewedAt, review_notes: notes }).eq("id", evidenceId), "Save evidence review");
+      await checked(adminClient.from("audit_events").insert({
+        actor_id: userId, event_type: decision === "verified" ? "company_evidence_verified" : "company_evidence_rejected",
+        entity_type: "evidence_document", entity_id: evidenceId,
+        details: { title: current.title, previous_status: current.verification_status, decision, notes, reviewer_email: authData.user.email || null },
+      }), "Write evidence review audit event");
+      return json({ success: true, evidence_id: evidenceId, decision, reviewed_at: reviewedAt }, 200, origin);
+    }
+    if (body.action !== "analyze" || !body.tender_id) return json({ error: "Expected action=analyze and tender_id." }, 400, origin);
     const apiKey = Deno.env.get("OPENAI_API_KEY");
     if (!apiKey) throw new Error("OPENAI_API_KEY is not configured in Supabase Edge Function secrets.");
-    const body = await req.json();
-    if (body.action !== "analyze" || !body.tender_id) return json({ error: "Expected action=analyze and tender_id." }, 400);
 
     const { data: tender, error: tenderError } = await adminClient.from("tenders").select("*").eq("id", body.tender_id).single();
-    if (tenderError || !tender) return json({ error: "Tender not found." }, 404);
-    await adminClient.from("tenders").update({ status: "analysing" }).eq("id", tender.id);
+    if (tenderError || !tender) return json({ error: "Tender not found." }, 404, origin);
+    runningTenderId = tender.id;
+    previousTenderStatus = tender.status || "uploaded";
+    await checked(adminClient.from("tenders").update({ status: "analysing" }).eq("id", tender.id), "Mark tender as analysing");
 
     const { data: files, error: filesError } = await adminClient.from("tender_files").select("*").eq("tender_id", tender.id).order("created_at");
     if (filesError) throw filesError;
     if (!files?.length) throw new Error("Attach at least one tender document before analysis.");
-    const { data: profile } = await adminClient.from("company_profile").select("*").eq("is_primary", true).maybeSingle();
-    const { data: financials } = await adminClient.from("company_financials").select("*").order("financial_year", { ascending: false });
-    const { data: evidence } = await adminClient.from("evidence_documents").select("*").eq("verification_status", "verified");
+    const { data: profile, error: profileError } = await adminClient.from("company_profile").select("*").eq("is_primary", true).maybeSingle();
+    if (profileError) throw new Error(`Load company profile: ${profileError.message}`);
+    const { data: financials, error: financialError } = await adminClient.from("company_financials").select("*").order("financial_year", { ascending: false });
+    if (financialError) throw new Error(`Load financial records: ${financialError.message}`);
+    const { data: evidence, error: evidenceError } = await adminClient.from("evidence_documents").select("*").eq("verification_status", "verified");
+    if (evidenceError) throw new Error(`Load verified evidence: ${evidenceError.message}`);
     const evidenceDocs = (evidence || []).filter((e: any) => !e.valid_until || new Date(e.valid_until) >= new Date());
 
     const tenderTexts: any[] = [];
     for (const file of files) {
-      await adminClient.from("tender_files").update({ extraction_status: "processing" }).eq("id", file.id);
+      await checked(adminClient.from("tender_files").update({ extraction_status: "processing" }).eq("id", file.id), `Mark ${file.original_filename} processing`);
       try {
         const { data: blob, error: downloadError } = await adminClient.storage.from(BUCKET).download(file.storage_path);
         if (downloadError || !blob) throw downloadError || new Error("Could not download tender file.");
         const extracted = await extractDocument(apiKey, new Uint8Array(await blob.arrayBuffer()), file.original_filename, file.mime_type || blob.type);
-        await adminClient.from("tender_files").update({
+        await checked(adminClient.from("tender_files").update({
           extraction_status: "completed", extracted_text: extracted.text, page_references: extracted.pages,
           page_count: extracted.metadata.page_count || extracted.pages.length || null, extraction_metadata: extracted.metadata,
-        }).eq("id", file.id);
+        }).eq("id", file.id), `Save extraction for ${file.original_filename}`);
         tenderTexts.push({ filename: file.original_filename, document_type: file.document_type, text: extracted.text, pages: extracted.pages });
       } catch (err) {
-        await adminClient.from("tender_files").update({ extraction_status: "failed", extraction_metadata: { error: String(err) } }).eq("id", file.id);
+        const failureWrite = await adminClient.from("tender_files").update({ extraction_status: "failed", extraction_metadata: { error: String(err) } }).eq("id", file.id);
+        if (failureWrite.error) console.error("Could not persist extraction failure", file.id, failureWrite.error);
         throw new Error(`Extraction failed for ${file.original_filename}: ${String(err)}`);
       }
     }
@@ -202,7 +240,7 @@ Deno.serve(async (req: Request) => {
           if (error || !blob) continue;
           const extracted = await extractDocument(apiKey, new Uint8Array(await blob.arrayBuffer()), item.original_filename || item.title, item.mime_type || blob.type);
           text = extracted.text;
-          await adminClient.from("evidence_documents").update({ extracted_text: text, page_references: extracted.pages, extracted_metadata: { ...item.extracted_metadata, extraction_method: extracted.metadata.method } }).eq("id", item.id);
+          await checked(adminClient.from("evidence_documents").update({ extracted_text: text, page_references: extracted.pages, extracted_metadata: { ...item.extracted_metadata, extraction_method: extracted.metadata.method, page_references: extracted.metadata.page_references || "available", location_hint: extracted.metadata.location_hint || null } }).eq("id", item.id), `Save extraction for evidence ${item.id}`);
         }
         if (text) evidenceTexts.push({ id: item.id, title: item.title, category: item.category, valid_until: item.valid_until, text: cleanText(text, 12000) });
       } catch (err) { console.error("Verified evidence extraction skipped", item.id, String(err)); }
@@ -220,7 +258,7 @@ Deno.serve(async (req: Request) => {
  "action_checklist":[string],
  "source_coverage":{"documents_reviewed":number,"limitations":[string]}
 }
-For every mandatory eligibility clause, cite the exact source document and page number where possible. Use null if page cannot be established. Do not invent clause references, amounts or pages. Match requirements ONLY against evidence listed below; the company profile's missing/unverified list is not proof. Evidence documents are usable only because their database status is verified. Financial records marked user_provided, needs_review or expired are NOT verified turnover proof. For any requirement lacking verified evidence, set missing_evidence or clarification_required, never pass. For mandatory condition demonstrably not met, set fail. Distinguish a missing document from a confirmed failure. Financial turnover thresholds should be extracted as numeric INR values (convert lakh/crore correctly). If multiple bid documents conflict, flag the conflict and prefer the latest corrigendum only when its date/order is explicit.
+For every mandatory eligibility clause, cite the exact source document and page number where possible. For DOCX, XLS/XLSX, TXT and CSV sources where printed page numbering cannot be preserved, set page_number null and identify the worksheet/section/paragraph in source_document or recommended_action; never invent a page. Use null if page cannot be established. Do not invent clause references, amounts or pages. Match requirements ONLY against evidence listed below; the company profile's missing/unverified list is not proof. Evidence documents are usable only because their database status is verified. Financial records marked user_provided, needs_review or expired are NOT verified turnover proof. For any requirement lacking verified evidence, set missing_evidence or clarification_required, never pass. For mandatory condition demonstrably not met, set fail. Distinguish a missing document from a confirmed failure. Financial turnover thresholds should be extracted as numeric INR values (convert lakh/crore correctly). If multiple bid documents conflict, flag the conflict and prefer the latest corrigendum only when its date/order is explicit.
 TENDER METADATA: ${JSON.stringify({ title: tender.title, reference: tender.tender_reference, procuring_entity: tender.procuring_entity, bid_value_inr: tender.bid_value_inr, emd_inr: tender.emd_inr, submission_deadline: tender.submission_deadline })}
 COMPANY PROFILE: ${JSON.stringify({ company_name: profile?.company_name || "Synergy Global Private Limited", business_domains: profile?.business_domains || [], confirmed_facts: profileData.confirmed_facts || [], unverified_or_missing: profileData.unverified_or_missing || [] })}
 FINANCIAL RECORDS: ${JSON.stringify((financials || []).map((f: any) => ({ financial_year: f.financial_year, turnover_inr: f.turnover_inr, verification_status: f.verification_status, evidence_document_id: f.evidence_document_id })))}
@@ -244,7 +282,7 @@ TENDER DOCUMENT TEXT (page-numbered where extraction could determine it): ${JSON
     const hasFail = mandatory.some((c: any) => statusFromClause(c) === "fail");
     const hasUnknown = mandatory.some((c: any) => ["missing_evidence", "clarification_required"].includes(statusFromClause(c)));
     const hasConditional = mandatory.some((c: any) => statusFromClause(c) === "conditional");
-    const verdict = hasFail ? "not_eligible" : hasUnknown ? "insufficient_evidence" : hasConditional ? "eligible_with_conditions" : "eligible";
+    const verdict = hasFail ? "not_eligible" : hasUnknown || financialStatus === "insufficient_evidence" ? "insufficient_evidence" : hasConditional ? "eligible_with_conditions" : "eligible";
     const missing = [...new Set([...(ai.missing_evidence || []), ...financialChecks])];
     const report = {
       tender: { id: tender.id, title: tender.title, tender_reference: tender.tender_reference, procuring_entity: tender.procuring_entity, bid_value_inr: tender.bid_value_inr },
@@ -254,7 +292,8 @@ TENDER DOCUMENT TEXT (page-numbered where extraction could determine it): ${JSON
       risk_assessment: { summary: ai.risk_summary || "", score: Math.min(100, clauses.filter((c: any) => ["fail", "missing_evidence", "clarification_required"].includes(statusFromClause(c))).length * 12) },
       action_checklist: ai.action_checklist || [], source_coverage: ai.source_coverage || {},
     };
-    const { data: previous } = await adminClient.from("tender_analyses").select("version").eq("tender_id", tender.id).order("version", { ascending: false }).limit(1).maybeSingle();
+    const { data: previous, error: previousError } = await adminClient.from("tender_analyses").select("version").eq("tender_id", tender.id).order("version", { ascending: false }).limit(1).maybeSingle();
+    if (previousError) throw new Error(`Load previous analysis version: ${previousError.message}`);
     const { data: analysis, error: insertError } = await adminClient.from("tender_analyses").insert({
       tender_id: tender.id, version: (previous?.version || 0) + 1, verdict,
       executive_summary: report.executive_summary, financial_assessment: report.financial_assessment,
@@ -279,16 +318,27 @@ TENDER DOCUMENT TEXT (page-numbered where extraction could determine it): ${JSON
     const reportPath = `${userId}/reports/${tender.id}/assessment-v${analysis.version}-${crypto.randomUUID()}.pdf`;
     const { error: uploadError } = await adminClient.storage.from(BUCKET).upload(reportPath, pdfBytes, { contentType: "application/pdf", upsert: false });
     if (uploadError) throw uploadError;
-    await adminClient.from("tender_analyses").update({ report_storage_path: reportPath }).eq("id", analysis.id);
-    await adminClient.from("tenders").update({
+    await checked(adminClient.from("tender_analyses").update({ report_storage_path: reportPath }).eq("id", analysis.id), "Save report path");
+    await checked(adminClient.from("tenders").update({
       status: verdict === "eligible" ? "go" : verdict === "eligible_with_conditions" ? "conditional_go" : verdict === "not_eligible" ? "no_go" : "analysis_ready",
       final_verdict: verdict, risk_score: report.risk_assessment.score, summary: { executive_summary: report.executive_summary, analysis_id: analysis.id },
-    }).eq("id", tender.id);
-    await adminClient.from("audit_events").insert({ actor_id: userId, event_type: "tender_analysis_completed", entity_type: "tender", entity_id: tender.id, details: { analysis_id: analysis.id, verdict, version: analysis.version } });
-    const { data: signed } = await adminClient.storage.from(BUCKET).createSignedUrl(reportPath, 60 * 10);
-    return json({ success: true, analysis_id: analysis.id, verdict, executive_summary: report.executive_summary, financial_assessment: report.financial_assessment, clauses: rows, missing_evidence: missing, report_url: signed?.signedUrl || null, report_filename: `Synergy-Tender-Assessment-${analysis.version}.pdf` });
+    }).eq("id", tender.id), "Save final tender verdict");
+    await checked(adminClient.from("audit_events").insert({ actor_id: userId, event_type: "tender_analysis_completed", entity_type: "tender", entity_id: tender.id, details: { analysis_id: analysis.id, verdict, version: analysis.version } }), "Write analysis audit event");
+    const { data: signed, error: signedError } = await adminClient.storage.from(BUCKET).createSignedUrl(reportPath, 60 * 10);
+    if (signedError) throw new Error(`Create private report URL: ${signedError.message}`);
+    runningTenderId = null;
+    return json({ success: true, analysis_id: analysis.id, verdict, executive_summary: report.executive_summary, financial_assessment: report.financial_assessment, clauses: rows, missing_evidence: missing, report_url: signed?.signedUrl || null, report_filename: `Synergy-Tender-Assessment-${analysis.version}.pdf` }, 200, origin);
   } catch (error) {
     console.error("tender-analysis failed", error);
-    return json({ error: error instanceof Error ? error.message : "Unexpected analysis error." }, 500);
+    if (runningTenderId) {
+      try {
+        const restoreClient = createClient(Deno.env.get("SUPABASE_URL")!, serviceKey(), { auth: { persistSession: false, autoRefreshToken: false } });
+        const restore = await restoreClient.from("tenders").update({ status: previousTenderStatus || "uploaded" }).eq("id", runningTenderId);
+        if (restore.error) throw restore.error;
+        const audit = await restoreClient.from("audit_events").insert({ actor_id: actorId, event_type: "tender_analysis_failed", entity_type: "tender", entity_id: runningTenderId, details: { restored_status: previousTenderStatus || "uploaded", error: String(error).slice(0, 2000) } });
+        if (audit.error) throw audit.error;
+      } catch (restoreError) { console.error("CRITICAL: failed to restore tender status", runningTenderId, String(restoreError)); }
+    }
+    return json({ error: error instanceof Error ? error.message : "Unexpected analysis error." }, 500, origin);
   }
 });
