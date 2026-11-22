@@ -105,3 +105,8 @@ test("failed status recovery surfaces database update errors", async () => {
   const client = { from() { return { update() { return { eq: async () => ({ error: { message: "write denied" } }) }; } }; } };
   await assert.rejects(() => restoreTenderAfterFailure(client, "tender-1", "uploaded", "admin-1", "test"), /Restore tender status: write denied/);
 });
+
+test("no mandatory clauses cannot produce an eligible verdict", () => {
+  assert.equal(determineVerdict([]), "insufficient_evidence");
+  assert.equal(determineVerdict([{ requirement_type: "informational", status: "pass" }]), "insufficient_evidence");
+});
