@@ -86,6 +86,7 @@ function App() {
   async function uploadCompanyEvidence(fileList, category = 'Company evidence') {
     const files = Array.from(fileList || []); if (!files.length) return; setUploading(true);
     for (const file of files) {
+      if (/\.doc$/i.test(file.name)) { notify(`Legacy .doc files are not supported. Please convert ${file.name} to PDF or DOCX.`); continue; }
       const path = `${user.id}/company/${crypto.randomUUID()}-${file.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
       const { error: upError } = await supabase.storage.from('synergy-tender-documents').upload(path, file, { upsert: false });
       if (upError) { notify(`Upload failed for ${file.name}: ${upError.message}`); continue; }
@@ -118,6 +119,7 @@ function App() {
     const files = Array.from(fileList || []); if (!files.length || !tender) return; setUploading(true);
     let succeeded = 0;
     for (const file of files) {
+      if (/\.doc$/i.test(file.name)) { notify(`Legacy .doc files are not supported. Please convert ${file.name} to PDF or DOCX.`); continue; }
       const path = `${user.id}/tenders/${tender.id}/${crypto.randomUUID()}-${file.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
       const { error: upError } = await supabase.storage.from('synergy-tender-documents').upload(path, file, { upsert: false });
       if (upError) { notify(`Upload failed for ${file.name}: ${upError.message}`); continue; }
@@ -130,15 +132,30 @@ function App() {
   }
 
   async function runAnalysis(tender = selected) {
-    if (!tender) return; setAnalysing(true); notify('Extracting documents and assessing tender clauses…');
-    const { data, error } = await supabase.functions.invoke('tender-analysis', { body: { action: 'analyze', tender_id: tender.id } });
-    if (error || data?.error) { notify(data?.error || error.message || 'Analysis failed.'); setAnalysing(false); return; }
-    setAnalysis({ id: data.analysis_id, verdict: data.verdict, executive_summary: data.executive_summary, financial_assessment: data.financial_assessment, report_storage_path: null });
-    const { data: savedClauses } = await supabase.from('compliance_items').select('*').eq('analysis_id', data.analysis_id).order('created_at'); setCompliance(savedClauses || []); setReportUrl(data.report_url || '');
-    const { data: refreshed } = await supabase.from('tenders').select('*').eq('id', tender.id).single();
-    if (refreshed) { setSelected(refreshed); setTenders(prev => prev.map(t => t.id === refreshed.id ? refreshed : t)); }
-    const { data: latestFiles } = await supabase.from('tender_files').select('*').eq('tender_id', tender.id).order('created_at');
-    setTenderFiles(latestFiles || []); setAnalysing(false); notify('Tender assessment completed. Review every cited clause before submission.');
+    if (!tender) return;
+    setAnalysing(true); notify('Extracting documents and assessing tender clauses…');
+    try {
+      const { data, error } = await supabase.functions.invoke('tender-analysis', { body: { action: 'analyze', tender_id: tender.id } });
+      if (error || data?.error) { notify(data?.error || error?.message || 'Analysis failed.'); return; }
+      setAnalysis({ id: data.analysis_id, verdict: data.verdict, executive_summary: data.executive_summary, financial_assessment: data.financial_assessment, report_storage_path: null });
+      setReportUrl(data.report_url || '');
+      const [clausesResult, tenderResult, filesResult] = await Promise.all([
+        supabase.from('compliance_items').select('*').eq('analysis_id', data.analysis_id).order('created_at'),
+        supabase.from('tenders').select('*').eq('id', tender.id).single(),
+        supabase.from('tender_files').select('*').eq('tender_id', tender.id).order('created_at')
+      ]);
+      if (clausesResult.error) notify(`Assessment saved, but compliance rows could not be loaded: ${clausesResult.error.message}`);
+      else setCompliance(clausesResult.data || []);
+      if (tenderResult.error) notify(`Assessment saved, but tender status could not be refreshed: ${tenderResult.error.message}`);
+      else if (tenderResult.data) { setSelected(tenderResult.data); setTenders(prev => prev.map(t => t.id === tenderResult.data.id ? tenderResult.data : t)); }
+      if (filesResult.error) notify(`Assessment saved, but document statuses could not be refreshed: ${filesResult.error.message}`);
+      else setTenderFiles(filesResult.data || []);
+      notify('Tender assessment completed. Review every cited clause before submission.');
+    } catch (err) {
+      notify(err?.message || 'Unexpected error while requesting the tender assessment.');
+    } finally {
+      setAnalysing(false);
+    }
   }
 
   async function downloadPrivateFile(path, name) {
