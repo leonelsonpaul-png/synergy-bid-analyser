@@ -293,7 +293,9 @@ TENDER DOCUMENT TEXT (page-numbered where extraction could determine it): ${JSON
     }
     const deadlineValue = extractedMetadata.submission_deadline || fallbackMetadata.submission_deadline;
     if (typeof deadlineValue === "string" && deadlineValue.trim()) {
-      const deadline = new Date(deadlineValue);
+      const hasTimezone = /(?:Z|[+-]\\d{2}:?\\d{2})$/i.test(deadlineValue);
+      const normalizedDeadline = hasTimezone ? deadlineValue : `${deadlineValue.replace(" ", "T")}+05:30`;
+      const deadline = new Date(normalizedDeadline);
       if (!Number.isNaN(deadline.getTime())) metadataPatch.submission_deadline = deadline.toISOString();
     }
     if (Object.keys(metadataPatch).length) {
