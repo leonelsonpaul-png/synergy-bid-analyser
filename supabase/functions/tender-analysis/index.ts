@@ -123,7 +123,8 @@ async function makePdf(report: any) {
   let page = pdf.addPage([595.28, 841.89]); let y = 800;
   const draw = (text: string, opts: { size?: number; strong?: boolean; color?: any } = {}) => {
     const size = opts.size || 9; const f = opts.strong ? bold : font;
-    for (const line of wrap(text, size >= 14 ? 70 : 100)) {
+    const safeText = String(text || "").replaceAll("₹", "INR ");
+    for (const line of wrap(safeText, size >= 14 ? 70 : 100)) {
       if (y < 48) { page = pdf.addPage([595.28, 841.89]); y = 800; }
       page.drawText(line, { x: 42, y, size, font: f, color: opts.color || rgb(0.12, 0.16, 0.22) }); y -= size + 5;
     }
@@ -380,7 +381,7 @@ TENDER DOCUMENT TEXT (page-numbered where extraction could determine it): ${JSON
       final_verdict: verdict, risk_score: report.risk_assessment.score, summary: { executive_summary: report.executive_summary, analysis_id: analysis.id },
     }).eq("id", tender.id), "Save final tender verdict");
     runningTenderId = null;
-    return json({ success: true, analysis_id: analysis.id, verdict, executive_summary: report.executive_summary, financial_assessment: report.financial_assessment, clauses: rows, missing_evidence: missing, report_url: signed?.signedUrl || null, report_filename: `Synergy-Tender-Assessment-${analysis.version}.pdf` }, 200, origin);
+    return json({ success: true, analysis_id: analysis.id, verdict, executive_summary: report.executive_summary, financial_assessment: report.financial_assessment, source_coverage: report.source_coverage, clauses: rows, missing_evidence: missing, report_url: signed?.signedUrl || null, report_filename: `Synergy-Tender-Assessment-${analysis.version}.pdf` }, 200, origin);
   } catch (error) {
     console.error("tender-analysis failed", error);
     if (runningTenderId) {
