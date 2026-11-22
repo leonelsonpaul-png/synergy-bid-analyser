@@ -39,7 +39,7 @@ function App() {
   const [financials, setFinancials] = useState([]); const [docs, setDocs] = useState([]); const [busy, setBusy] = useState(false);
   const [query, setQuery] = useState(''); const [modal, setModal] = useState(false); const [toast, setToast] = useState('');
   const [selected, setSelected] = useState(null); const [tenderFiles, setTenderFiles] = useState([]); const [uploading, setUploading] = useState(false);
-  const [analysis, setAnalysis] = useState(null); const [compliance, setCompliance] = useState([]);
+  const [analysis, setAnalysis] = useState(null); const [compliance, setCompliance] = useState([]); const [analysing, setAnalysing] = useState(false); const [reportUrl, setReportUrl] = useState('');
 
   useEffect(() => {
     if (!supabase) { setChecking(false); return; }
@@ -90,7 +90,7 @@ function App() {
   }
 
   async function openTender(t) {
-    setSelected(t); setPage('tender-detail'); setAnalysis(null); setCompliance([]); setTenderFiles([]);
+    setSelected(t); setPage('tender-detail'); setAnalysis(null); setCompliance([]); setTenderFiles([]); setReportUrl('');
     const [files, a] = await Promise.all([
       supabase.from('tender_files').select('*').eq('tender_id', t.id).order('created_at', { ascending: true }),
       supabase.from('tender_analyses').select('*').eq('tender_id', t.id).order('version', { ascending: false }).limit(1).maybeSingle()
@@ -111,7 +111,19 @@ function App() {
       if (error) notify(`File stored but tender file record failed: ${error.message}`); else succeeded++;
     }
     const { data: filesNow } = await supabase.from('tender_files').select('*').eq('tender_id', tender.id).order('created_at');
-    setTenderFiles(filesNow || []); setUploading(false); notify(`${succeeded} tender document(s) attached. AI extraction is not yet configured.`);
+    setTenderFiles(filesNow || []); setUploading(false); notify(`${succeeded} tender document(s) attached. Run AI assessment when the complete bid package is ready.`);
+  }
+
+  async function runAnalysis(tender = selected) {
+    if (!tender) return; setAnalysing(true); notify('Extracting documents and assessing tender clauses…');
+    const { data, error } = await supabase.functions.invoke('tender-analysis', { body: { action: 'analyze', tender_id: tender.id } });
+    if (error || data?.error) { notify(data?.error || error.message || 'Analysis failed.'); setAnalysing(false); return; }
+    setAnalysis({ id: data.analysis_id, verdict: data.verdict, executive_summary: data.executive_summary, financial_assessment: data.financial_assessment, report_storage_path: null });
+    setCompliance(data.clauses || []); setReportUrl(data.report_url || '');
+    const { data: refreshed } = await supabase.from('tenders').select('*').eq('id', tender.id).single();
+    if (refreshed) { setSelected(refreshed); setTenders(prev => prev.map(t => t.id === refreshed.id ? refreshed : t)); }
+    const { data: latestFiles } = await supabase.from('tender_files').select('*').eq('tender_id', tender.id).order('created_at');
+    setTenderFiles(latestFiles || []); setAnalysing(false); notify('Tender assessment completed. Review every cited clause before submission.');
   }
 
   async function downloadPrivateFile(path, name) {
@@ -157,7 +169,7 @@ function App() {
       {page==='company' && <><section className="panel"><div className="panel-head"><div><h3>Permanent bidder profile</h3><p>Reusable baseline for all future tender comparisons</p></div><span className="tag green">Fixed company profile</span></div><div className="profile-grid"><div><small>REGISTERED BIDDER NAME</small><b>{profile?.company_name || 'Synergy Global Private Limited'}</b></div><div><small>BUSINESS DOMAINS</small><b>{(profile?.business_domains || ['AV solutions','IT & technology']).join(' · ')}</b></div><div><small>PROFILE STATUS</small><b>Initial baseline – evidence completion pending</b></div></div><h4>Financial turnover records</h4><div className="table-wrap"><table><thead><tr><th>Financial year</th><th>Turnover</th><th>Evidence status</th></tr></thead><tbody>{financials.map(f=><tr key={f.id}><td>{f.financial_year}</td><td>{money(f.turnover_inr)}</td><td><span className={`tag ${f.verification_status==='verified'?'green':'amber'}`}>{f.verification_status.replaceAll('_',' ')}</span></td></tr>)}</tbody></table></div><div className="notice"><AlertTriangle size={17}/> Stored turnover values are user-provided, not independently verified. Do not treat them as audited proof until supporting documents are checked.</div></section>
         <section className="panel"><div className="panel-head"><div><h3>Company evidence repository</h3><p>Upload certificates once; reuse them in future bid assessments.</p></div><label className={`primary upload-btn ${uploading?'disabled':''}`}><UploadCloud size={16}/> {uploading?'Uploading…':'Upload evidence'}<input type="file" multiple accept={fileAccept} disabled={uploading} onChange={e=>uploadCompanyEvidence(e.target.files)}/></label></div><div className="evidence-list">{docs.length?docs.map(d=><div className="evidence-row" key={d.id}><FileText/><div><b>{d.title}</b><small>{d.category} · Uploaded {date(d.created_at)}</small></div><span className={`tag ${d.verification_status==='verified'?'green':'amber'}`}>{d.verification_status}</span><button className="icon-btn" title="Download" onClick={()=>downloadPrivateFile(d.storage_path,d.original_filename)}><Download size={16}/></button></div>):<div className="empty">No company evidence uploaded yet.</div>}</div></section></>}
       {page==='history' && <section className="panel"><div className="panel-head"><div><h3>Complete tender history</h3><p>Search, review and revisit previous qualification decisions.</p></div><div className="searchbox"><Search size={16}/><input placeholder="Search tender history" value={query} onChange={e=>setQuery(e.target.value)}/></div></div><TenderTable rows={filtered} onOpen={openTender}/></section>}
-      {page==='tender-detail' && selected && <TenderWorkspace tender={selected} files={tenderFiles} analysis={analysis} compliance={compliance} uploading={uploading} onBack={()=>setPage('tenders')} onUpload={uploadTenderFiles} onDownload={downloadPrivateFile} onUpdate={updateTender}/ >}
+      {page==='tender-detail' && selected && <TenderWorkspace tender={selected} files={tenderFiles} analysis={analysis} compliance={compliance} uploading={uploading} analysing={analysing} reportUrl={reportUrl} onAnalyze={()=>runAnalysis(selected)} onBack={()=>setPage('tenders')} onUpload={uploadTenderFiles} onDownload={downloadPrivateFile} onUpdate={updateTender}/ >}
       <footer>Synergy Global Private Limited · Confidential · Administrator access only</footer>
     </main>
     {modal && <CreateTender onClose={()=>setModal(false)} onCreate={createTender}/>}
@@ -169,7 +181,7 @@ function classifyDocument(name) { const n=name.toLowerCase(); if(n.includes('atc
 function Stat({icon:Icon,label,value}) { return <div className="stat"><div className="stat-icon"><Icon size={19}/></div><div><small>{label}</small><strong>{value}</strong></div></div>; }
 function TenderTable({rows,onOpen}) { if(!rows.length) return <div className="empty">No tenders found. Create a tender to begin.</div>; return <div className="table-wrap"><table><thead><tr><th>Tender / reference</th><th>Bid value</th><th>Deadline</th><th>Verdict</th><th>Status</th><th></th></tr></thead><tbody>{rows.map(t=><tr key={t.id}><td><button className="table-link" onClick={()=>onOpen?.(t)}><b>{t.title}</b><small>{t.tender_reference||'Reference pending'}{t.procuring_entity?` · ${t.procuring_entity}`:''}</small></button></td><td>{money(t.bid_value_inr)}</td><td>{date(t.submission_deadline)}</td><td><span className={`tag ${verdictClass(t.final_verdict)}`}>{verdictLabel(t.final_verdict)}</span></td><td>{(t.status||'uploaded').replaceAll('_',' ')}</td><td><button className="icon-btn" onClick={()=>onOpen?.(t)} title="Open tender"><ChevronRight size={17}/></button></td></tr>)}</tbody></table></div>; }
 
-function TenderWorkspace({tender,files,analysis,compliance,uploading,onBack,onUpload,onDownload,onUpdate}) {
+function TenderWorkspace({tender,files,analysis,compliance,uploading,analysing,reportUrl,onAnalyze,onBack,onUpload,onDownload,onUpdate}) {
   const [fileType,setFileType]=useState('');
   return <div className="tender-workspace"><div className="workspace-back"><button className="text-btn" onClick={onBack}>‹ Back to tenders</button><span className="tag amber">{(tender.status||'uploaded').replaceAll('_',' ')}</span></div>
     <section className="panel"><div className="panel-head"><div><div className="eyebrow">{tender.tender_reference || 'REFERENCE PENDING'}</div><h3>{tender.title}</h3><p>{tender.procuring_entity || 'Procuring entity not entered'} · {tender.portal || 'Portal not specified'}</p></div><span className={`tag ${verdictClass(tender.final_verdict)}`}>{verdictLabel(tender.final_verdict)}</span></div>
@@ -180,8 +192,8 @@ function TenderWorkspace({tender,files,analysis,compliance,uploading,onBack,onUp
       <div className="file-checklist"><span><FileCheck2 size={15}/> Main tender</span><span><FileCheck2 size={15}/> Buyer ATC</span><span><FileCheck2 size={15}/> BOQ</span><span><FileCheck2 size={15}/> Annexures</span><span><FileCheck2 size={15}/> Corrigenda</span></div>
       {files.length ? <div className="evidence-list">{files.map(f=><div className="evidence-row" key={f.id}><FileText/><div><b>{f.original_filename}</b><small>{f.document_type} · {f.mime_type||'File'} · {date(f.created_at)}</small></div><span className={`tag ${f.extraction_status==='completed'?'green':'amber'}`}>{f.extraction_status}</span><button className="icon-btn" title="Download" onClick={()=>onDownload(f.storage_path,f.original_filename)}><Download size={16}/></button></div>)}</div> : <div className="empty">No tender files attached yet.</div>}
     </section>
-    <section className="panel"><div className="panel-head"><div><h3>Analysis and compliance</h3><p>Clause-level findings with source page references will appear here.</p></div><span className="tag amber">AI service pending</span></div>
-      {analysis ? <><div className="analysis-summary"><b>{verdictLabel(analysis.verdict)}</b><p>{analysis.executive_summary || 'No executive summary available.'}</p></div><div className="notice"><AlertTriangle size={17}/> Review the source documents and evidence before relying on this assessment.</div>{compliance.length>0 && <div className="table-wrap"><table><thead><tr><th>Clause / page</th><th>Requirement</th><th>Category</th><th>Status</th><th>Gap / risk</th></tr></thead><tbody>{compliance.map(c=><tr key={c.id}><td>{c.clause_reference||'—'} / {c.page_number||'—'}</td><td>{c.requirement}</td><td>{c.category}</td><td>{c.status}</td><td>{c.gap_or_risk||'—'}</td></tr>)}</tbody></table></div>}</> : <div className="notice"><CircleHelp size={17}/> Documents can be uploaded and stored now. OCR, PDF text extraction, AI clause mapping, financial calculations against individual tender clauses, and downloadable assessment reports have not yet been connected. This workspace will not mark any tender requirement as passed without evidence.</div>}
+    <section className="panel"><div className="panel-head"><div><h3>Analysis and compliance</h3><p>AI extraction, evidence matching, financial checks and clause-level findings.</p></div><div className="top-actions"><button className="primary" disabled={analysing || !files.length} onClick={onAnalyze}>{analysing?'Analysing…':analysis?'Re-run assessment':'Run AI assessment'}</button>{reportUrl && <a className="secondary report-download" href={reportUrl} target="_blank" rel="noreferrer" download="Synergy-Tender-Assessment.pdf">Download PDF report</a>}</div></div>
+      {analysis ? <><div className="analysis-summary"><b>{verdictLabel(analysis.verdict)}</b><p>{analysis.executive_summary || 'No executive summary available.'}</p>{analysis.financial_assessment && <p><b>Financial assessment:</b> {analysis.financial_assessment.status} — {analysis.financial_assessment.explanation}</p>}</div><div className="notice"><AlertTriangle size={17}/> Review the source documents and evidence before relying on this assessment.</div>{compliance.length>0 && <div className="table-wrap"><table><thead><tr><th>Clause / page</th><th>Requirement</th><th>Category</th><th>Status</th><th>Gap / risk</th></tr></thead><tbody>{compliance.map(c=><tr key={c.id}><td>{c.clause_reference||'—'} / {c.page_number||'—'}</td><td>{c.requirement}</td><td>{c.category}</td><td>{c.status}</td><td>{c.gap_or_risk||'—'}</td></tr>)}</tbody></table></div>}</> : <div className="notice"><CircleHelp size={17}/> Attach the main tender, ATC, BOQ, annexures and corrigenda, then run the assessment. Only company evidence marked verified is used as proof of eligibility.</div>}
     </section>
   </div>;
 }
