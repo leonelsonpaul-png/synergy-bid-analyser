@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { calculateFinancialEligibility } from "../supabase/functions/_shared/financial.js";
+import { determineVerdict, collectMissingEvidence, restoreTenderAfterFailure } from "../supabase/functions/_shared/analysis_rules.js";
 
 const row = (year, turnover, status = "verified", evidence = "proof-id") => ({
   financial_year: year, turnover_inr: turnover, verification_status: status, evidence_document_id: evidence,
@@ -66,4 +67,36 @@ test("checks average and single-year thresholds together", () => {
   ], { required_average_turnover_inr: 18_00_00_000, required_single_year_turnover_inr: 24_00_00_000, turnover_years_required: 3 }, ["proof-id"]);
   assert.equal(result.status, "pass");
   assert.equal(result.average, 50_00_00_000 / 3);
+});
+
+test("verdict prioritises mandatory failure over other unknowns", () => {
+  assert.equal(determineVerdict([
+    { requirement_type: "mandatory", status: "missing_evidence" },
+    { requirement_type: "mandatory", status: "fail" },
+  ]), "not_eligible");
+});
+
+test("verdict remains insufficient when mandatory proof is missing", () => {
+  assert.equal(determineVerdict([{ requirement_type: "mandatory", status: "missing_evidence" }]), "insufficient_evidence");
+  assert.equal(determineVerdict([], "insufficient_evidence"), "insufficient_evidence");
+});
+
+test("missing evidence is deduplicated and empty values are removed", () => {
+  assert.deepEqual(collectMissingEvidence(["GST certificate", "GST certificate", ""], ["Audited turnover proof"]), ["GST certificate", "Audited turnover proof"]);
+});
+
+test("failed analysis restores the previous tender status and writes an audit event", async () => {
+  const calls = [];
+  const client = { from(table) { return {
+    update(value) { calls.push({ table, operation: "update", value }); return { eq: async (column, value) => { calls.push({ column, value }); return { error: null }; } }; },
+    insert(value) { calls.push({ table, operation: "insert", value }); return Promise.resolve({ error: null }); },
+  }; } };
+  await restoreTenderAfterFailure(client, "tender-1", "analysis_ready", "admin-1", new Error("OCR timeout"));
+  assert.deepEqual(calls[0], { table: "tenders", operation: "update", value: { status: "analysis_ready" } });
+  assert.equal(calls.some((call) => call.table === "audit_events" && call.value.event_type === "tender_analysis_failed"), true);
+});
+
+test("failed status recovery surfaces database update errors", async () => {
+  const client = { from() { return { update() { return { eq: async () => ({ error: { message: "write denied" } }) }; } }; } };
+  await assert.rejects(() => restoreTenderAfterFailure(client, "tender-1", "uploaded", "admin-1", "test"), /Restore tender status: write denied/);
 });
