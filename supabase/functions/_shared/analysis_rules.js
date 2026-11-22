@@ -2,6 +2,7 @@ export function determineVerdict(clauses = [], financialStatus = "not_applicable
   const mandatory = clauses.filter((clause) => clause.requirement_type === "mandatory" && clause.status !== "not_applicable");
   const statuses = mandatory.map((clause) => String(clause.status || "clarification_required").toLowerCase());
   if (statuses.includes("fail")) return "not_eligible";
+  if (mandatory.length === 0) return "insufficient_evidence";
   if (statuses.some((status) => ["missing_evidence", "clarification_required"].includes(status)) || financialStatus === "insufficient_evidence") return "insufficient_evidence";
   if (statuses.includes("conditional")) return "eligible_with_conditions";
   return "eligible";
