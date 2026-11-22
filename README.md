@@ -61,3 +61,13 @@ Build command: `npm run build`
 Output directory: `dist`
 
 Do not commit `.env`, `node_modules/`, or `dist/` to source control. `.env.example` contains the public project configuration template only.
+
+## Tender analysis Edge Function configuration
+
+Set the following **server-side Supabase Edge Function secrets** before deploying the function:
+
+- `OPENAI_API_KEY` — OpenAI API key; never expose it in a browser or any `VITE_*` variable.
+- `APP_ORIGIN` — exact frontend origin, including scheme and optional port (for example, `https://your-approved-app-domain.example`). Multiple explicitly approved origins may be comma-separated. The function rejects browser origins not listed here and does not use wildcard CORS.
+- `SUPABASE_SERVICE_ROLE_KEY` (or the platform-provided secret key) — server-side only.
+
+The `synergy-tender-documents` Storage bucket is private. Browser downloads use short-lived signed URLs and the Edge Function accesses objects using its server-side service key. The application upload picker accepts PDF, DOCX, XLS/XLSX and PNG/JPG; legacy binary DOC is intentionally excluded because extraction is not supported.
