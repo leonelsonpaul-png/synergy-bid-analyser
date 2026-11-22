@@ -138,7 +138,10 @@ async function makePdf(report: any) {
   draw(report.executive_summary || "No executive summary supplied.");
   y -= 8; draw("FINANCIAL ELIGIBILITY", { size: 11, strong: true });
   const f = report.financial_assessment || {};
-  draw(`Required average turnover: ${formatINR(f.required_average_turnover_inr)} | Verified average available: ${formatINR(f.verified_average_turnover_inr)}`);
+  const bidder = f.bidder || f;
+  const oem = f.oem || {};
+  draw(`BIDDER turnover: required average ${formatINR(bidder.required_average_turnover_inr)} | verified average ${formatINR(bidder.verified_average_turnover_inr)} | status ${bidder.status || f.status || "insufficient_evidence"}`);
+  draw(`OEM turnover: required average ${formatINR(oem.required_average_turnover_inr)} | verified average ${formatINR(oem.verified_average_turnover_inr)} | status ${oem.status || "not assessed"}`);
   draw(`Financial result: ${f.status || "insufficient_evidence"} | Basis: ${f.explanation || "No explanation supplied"}`);
   y -= 8; draw("CLAUSE-WISE COMPLIANCE", { size: 11, strong: true });
   for (const c of report.clauses || []) {
