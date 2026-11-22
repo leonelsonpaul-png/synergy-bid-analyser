@@ -11,7 +11,7 @@ test("requires all requested verified years before passing average turnover", ()
     row("FY 2025-26", 55_00_00_000),
     row("FY 2024-25", 26_00_00_000),
     row("FY 2023-24", 7_00_00_000, "user_provided", null),
-  ], { required_average_turnover_inr: 20_00_00_000, turnover_years_required: 3 });
+  ], { required_average_turnover_inr: 20_00_00_000, turnover_years_required: 3 }, ["proof-id"]);
   assert.equal(result.status, "insufficient_evidence");
   assert.equal(result.average, null);
   assert.match(result.checks[0], /only 2 qualifying verified records/);
@@ -23,7 +23,7 @@ test("calculates average using linked verified records only", () => {
     row("FY 2024-25", 26_00_00_000),
     row("FY 2023-24", 7_00_00_000),
     row("FY 2022-23", 99_00_00_000, "user_provided", null),
-  ], { required_average_turnover_inr: 20_00_00_000, turnover_years_required: 3 });
+  ], { required_average_turnover_inr: 20_00_00_000, turnover_years_required: 3 }, ["proof-id"]);
   assert.equal(result.status, "pass");
   assert.equal(result.average, (55_00_00_000 + 26_00_00_000 + 7_00_00_000) / 3);
   assert.equal(result.selected.length, 3);
@@ -34,7 +34,7 @@ test("flags a verified turnover shortfall", () => {
     row("FY 2025-26", 10_00_00_000),
     row("FY 2024-25", 12_00_00_000),
     row("FY 2023-24", 8_00_00_000),
-  ], { required_average_turnover_inr: 15_00_00_000, turnover_years_required: 3 });
+  ], { required_average_turnover_inr: 15_00_00_000, turnover_years_required: 3 }, ["proof-id"]);
   assert.equal(result.status, "fail");
   assert.match(result.checks.join(" "), /below required/);
 });
