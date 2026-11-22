@@ -38,17 +38,11 @@ The browser uses the Supabase **publishable** key only. Never put a Supabase ser
 - Generate short-lived signed URLs to download private files.
 - View stored analysis and compliance rows if present.
 
-## Not yet implemented
+## Tender analysis pipeline status
 
-The frontend intentionally does not claim that tender analysis is automated yet. The following services still need to be built and connected:
+The feature branch contains the AI tender-analysis pipeline: PDF OCR/page extraction, DOCX and spreadsheet text extraction, clause-wise compliance assessment, evidence matching, deterministic financial checks, private PDF report generation, and administrator evidence review/audit history. The Edge Function is not deployed by this branch change. Uploads remain pending until an administrator runs an assessment in an environment where the migration and function have been deployed.
 
-- OCR / PDF, DOCX and XLSX text extraction, including page-level source locations.
-- AI clause extraction and evidence-matched compliance assessment.
-- Financial eligibility calculations for each tender's exact rules.
-- Technical/OEM/certification/experience comparison engine.
-- PDF assessment report and Excel compliance matrix export.
-
-Uploaded tender files are marked `pending` for extraction until that processing pipeline is deployed. Do not treat an uploaded document as analysed or any criterion as passed solely because the file is present.
+Page numbers are retained for PDF/image sources when extraction can determine them. DOCX, XLS/XLSX, TXT and CSV do not preserve stable printed pagination; the report identifies those limitations and uses section/worksheet references where available. Legacy binary DOC is not accepted.
 
 ## Deployment
 
