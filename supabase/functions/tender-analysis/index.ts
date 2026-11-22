@@ -233,18 +233,27 @@ Deno.serve(async (req: Request) => {
     }
 
     const evidenceTexts: any[] = [];
+    const evidenceExtractionWarnings: string[] = [];
     for (const item of evidenceDocs) {
       try {
         let text = item.extracted_text || "";
+        let pages = item.page_references || [];
+        let metadata = item.extracted_metadata || {};
         if (!text) {
           const { data: blob, error } = await adminClient.storage.from(BUCKET).download(item.storage_path);
-          if (error || !blob) continue;
+          if (error || !blob) throw new Error(error?.message || "Private Storage download returned no file.");
           const extracted = await extractDocument(apiKey, new Uint8Array(await blob.arrayBuffer()), item.original_filename || item.title, item.mime_type || blob.type);
           text = extracted.text;
-          await checked(adminClient.from("evidence_documents").update({ extracted_text: text, page_references: extracted.pages, extracted_metadata: { ...item.extracted_metadata, extraction_method: extracted.metadata.method, page_references: extracted.metadata.page_references || "available", location_hint: extracted.metadata.location_hint || null } }).eq("id", item.id), `Save extraction for evidence ${item.id}`);
+          pages = extracted.pages;
+          metadata = { ...metadata, extraction_method: extracted.metadata.method, page_references: extracted.metadata.page_references || "available", location_hint: extracted.metadata.location_hint || null };
+          await checked(adminClient.from("evidence_documents").update({ extracted_text: text, page_references: pages, extracted_metadata: metadata }).eq("id", item.id), `Save extraction for evidence ${item.id}`);
         }
-        if (text) evidenceTexts.push({ id: item.id, title: item.title, category: item.category, valid_until: item.valid_until, text: cleanText(text, 12000) });
-      } catch (err) { console.error("Verified evidence extraction skipped", item.id, String(err)); }
+        if (text) evidenceTexts.push({ id: item.id, title: item.title, category: item.category, valid_until: item.valid_until, pages, extraction_metadata: metadata, text: cleanText(text, 12000) });
+        else evidenceExtractionWarnings.push(`${item.title}: verified evidence document could not be converted to text and was not used in matching.`);
+      } catch (err) {
+        evidenceExtractionWarnings.push(`${item.title}: verified evidence could not be read/extracted (${String(err)}); not used as proof.`);
+        console.error("Verified evidence extraction skipped", item.id, String(err));
+      }
     }
 
     const profileData = profile?.profile_data || {};
@@ -284,7 +293,7 @@ TENDER DOCUMENT TEXT (page-numbered where extraction could determine it): ${JSON
       .map((item: any) => `${item.filename}: ${item.metadata.location_hint || "source format does not preserve printed page numbers"}; use section/worksheet references instead of page citations.`);
     const pdfPageLimitations = tenderTexts.filter((item: any) => item.metadata?.method === "openai-pdf-vision-ocr" && !item.pages?.length)
       .map((item: any) => `${item.filename}: PDF extraction did not return per-page text; verify page citations against the original file.`);
-    const missing = collectMissingEvidence(ai.missing_evidence || [], [...financialChecks, ...pageLimitations, ...pdfPageLimitations]);
+    const missing = collectMissingEvidence(ai.missing_evidence || [], [...financialChecks, ...pageLimitations, ...pdfPageLimitations, ...evidenceExtractionWarnings]);
     const report = {
       tender: { id: tender.id, title: tender.title, tender_reference: tender.tender_reference, procuring_entity: tender.procuring_entity, bid_value_inr: tender.bid_value_inr },
       verdict, executive_summary: ai.executive_summary || "", clauses, missing_evidence: missing,
