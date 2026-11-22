@@ -1,7 +1,8 @@
-export function calculateFinancialEligibility(financials = [], rules = []) {
+export function calculateFinancialEligibility(financials = [], rules = {}, verifiedEvidenceIds = []) {
+  const validEvidence = new Set(verifiedEvidenceIds);
   const yearsRequired = Math.max(1, Math.min(5, Number(rules.turnover_years_required) || 3));
   const verifiedFinancials = financials.filter((item) =>
-    item.verification_status === "verified" && Boolean(item.evidence_document_id)
+    item.verification_status === "verified" && Boolean(item.evidence_document_id) && validEvidence.has(item.evidence_document_id)
   ).sort((a, b) => String(b.financial_year).localeCompare(String(a.financial_year)));
   const selected = verifiedFinancials.slice(0, yearsRequired);
   const average = selected.length === yearsRequired
