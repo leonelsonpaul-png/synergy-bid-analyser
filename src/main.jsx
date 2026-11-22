@@ -17,7 +17,7 @@ const date = d => d ? new Date(d).toLocaleDateString('en-IN', { day: '2-digit', 
 const dateTime = d => d ? new Date(d).toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'Not specified';
 const verdictLabel = v => ({ eligible: 'Eligible', eligible_with_conditions: 'Eligible with conditions', not_eligible: 'Not eligible', insufficient_evidence: 'Insufficient evidence' }[v] || 'Not assessed');
 const verdictClass = v => v === 'eligible' ? 'green' : v === 'not_eligible' ? 'red' : 'amber';
-const fileAccept = '.pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg';
+const fileAccept = '.pdf,.docx,.xls,.xlsx,.png,.jpg,.jpeg';
 
 function Login({ onLogin }) {
   const [email, setEmail] = useState(''); const [password, setPassword] = useState('');
@@ -40,6 +40,7 @@ function App() {
   const [query, setQuery] = useState(''); const [modal, setModal] = useState(false); const [toast, setToast] = useState('');
   const [selected, setSelected] = useState(null); const [tenderFiles, setTenderFiles] = useState([]); const [uploading, setUploading] = useState(false);
   const [analysis, setAnalysis] = useState(null); const [compliance, setCompliance] = useState([]); const [analysing, setAnalysing] = useState(false); const [reportUrl, setReportUrl] = useState('');
+  const [evidenceAudit, setEvidenceAudit] = useState([]);
 
   useEffect(() => {
     if (!supabase) { setChecking(false); return; }
@@ -69,6 +70,11 @@ function App() {
       supabase.from('evidence_documents').select('*').order('created_at', { ascending: false })
     ]);
     const failures = [t,p,f,d].filter(x => x.error);
+    if (!d.error && d.data?.length) {
+      const audit = await supabase.from('audit_events').select('*').eq('entity_type', 'evidence_document').in('entity_id', d.data.map(x => x.id)).order('created_at', { ascending: false });
+      if (audit.error) notify(`Evidence audit history could not be loaded: ${audit.error.message}`);
+      else setEvidenceAudit(audit.data || []);
+    } else if (!d.error) setEvidenceAudit([]);
     if (!t.error) setTenders(t.data || []); if (!p.error) setProfile(p.data); if (!f.error) setFinancials(f.data || []); if (!d.error) setDocs(d.data || []);
     if (failures.length) notify(`Some records could not be loaded: ${failures[0].error.message}`);
     setBusy(false);
@@ -87,6 +93,15 @@ function App() {
       if (error) notify(`File stored but evidence record failed: ${error.message}`);
     }
     await load(); setUploading(false); notify('Company evidence upload finished. Verification remains pending until reviewed.');
+  }
+
+  async function reviewEvidence(evidenceId, decision) {
+    const notes = window.prompt(`Optional reviewer notes for ${decision}:`, '');
+    if (notes === null) return;
+    const { data, error } = await supabase.functions.invoke('tender-analysis', { body: { action: 'review_evidence', evidence_id: evidenceId, decision, notes } });
+    if (error || data?.error) { notify(data?.error || error.message || 'Evidence review failed.'); return; }
+    await load();
+    notify(`Evidence document ${decision}.`);
   }
 
   async function openTender(t) {
@@ -164,10 +179,10 @@ function App() {
           <section className="panel"><div className="panel-head"><div><h3>Company readiness</h3><p>Permanent bidder profile</p></div><button className="text-btn" onClick={()=>setPage('company')}>Open profile <ChevronRight size={15}/></button></div><div className="readiness"><div className="readiness-icon"><Building2/></div><div><b>{profile?.company_name || 'Synergy Global Private Limited'}</b><p>Turnover records loaded · verification pending</p></div></div>{financials.map(f=><div className="financial-line" key={f.id}><span>{f.financial_year}</span><b>{money(f.turnover_inr)}</b><em>{f.verification_status==='verified'?'Verified':'Proof pending'}</em></div>)}<div className="notice"><AlertTriangle size={17}/> Average of stored turnover figures: {money(avg)}. Upload audited statements and CA certificates before relying on these figures in a bid.</div></section></div>
       </>}
       {page==='tenders' && <><div className="page-intro"><div><h3>Start a tender assessment</h3><p>Create a tender record, then attach the main bid, ATC, BOQ, annexures and corrigenda.</p></div><button className="primary" onClick={()=>setModal(true)}><Plus size={17}/> Create tender</button></div>
-        <section className="panel"><div className="upload-zone"><UploadCloud size={30}/><h3>Build a complete tender file</h3><p>Create a tender record first. You can then attach multiple documents in its workspace.</p><button className="primary" onClick={()=>setModal(true)}>Create tender record</button></div><div className="notice"><CircleHelp size={17}/> Secure uploads are connected. Automated OCR, clause extraction and AI eligibility analysis are not yet connected; uploads will be stored with extraction status “pending”.</div></section>
+        <section className="panel"><div className="upload-zone"><UploadCloud size={30}/><h3>Build a complete tender file</h3><p>Create a tender record first. You can then attach multiple documents in its workspace.</p><button className="primary" onClick={()=>setModal(true)}>Create tender record</button></div><div className="notice"><CircleHelp size={17}/> AI-powered document extraction, clause analysis, financial checks and report generation are connected to the secure analysis service. Uploads remain pending until you run an assessment.</div></section>
         <section className="panel"><div className="panel-head"><div><h3>All tenders</h3><p>Every assessment remains in tender history</p></div><div className="searchbox"><Search size={16}/><input placeholder="Search tender or reference" value={query} onChange={e=>setQuery(e.target.value)}/></div></div><TenderTable rows={filtered} onOpen={openTender}/></section></>}
       {page==='company' && <><section className="panel"><div className="panel-head"><div><h3>Permanent bidder profile</h3><p>Reusable baseline for all future tender comparisons</p></div><span className="tag green">Fixed company profile</span></div><div className="profile-grid"><div><small>REGISTERED BIDDER NAME</small><b>{profile?.company_name || 'Synergy Global Private Limited'}</b></div><div><small>BUSINESS DOMAINS</small><b>{(profile?.business_domains || ['AV solutions','IT & technology']).join(' · ')}</b></div><div><small>PROFILE STATUS</small><b>Initial baseline – evidence completion pending</b></div></div><h4>Financial turnover records</h4><div className="table-wrap"><table><thead><tr><th>Financial year</th><th>Turnover</th><th>Evidence status</th></tr></thead><tbody>{financials.map(f=><tr key={f.id}><td>{f.financial_year}</td><td>{money(f.turnover_inr)}</td><td><span className={`tag ${f.verification_status==='verified'?'green':'amber'}`}>{f.verification_status.replaceAll('_',' ')}</span></td></tr>)}</tbody></table></div><div className="notice"><AlertTriangle size={17}/> Stored turnover values are user-provided, not independently verified. Do not treat them as audited proof until supporting documents are checked.</div></section>
-        <section className="panel"><div className="panel-head"><div><h3>Company evidence repository</h3><p>Upload certificates once; reuse them in future bid assessments.</p></div><label className={`primary upload-btn ${uploading?'disabled':''}`}><UploadCloud size={16}/> {uploading?'Uploading…':'Upload evidence'}<input type="file" multiple accept={fileAccept} disabled={uploading} onChange={e=>uploadCompanyEvidence(e.target.files)}/></label></div><div className="evidence-list">{docs.length?docs.map(d=><div className="evidence-row" key={d.id}><FileText/><div><b>{d.title}</b><small>{d.category} · Uploaded {date(d.created_at)}</small></div><span className={`tag ${d.verification_status==='verified'?'green':'amber'}`}>{d.verification_status}</span><button className="icon-btn" title="Download" onClick={()=>downloadPrivateFile(d.storage_path,d.original_filename)}><Download size={16}/></button></div>):<div className="empty">No company evidence uploaded yet.</div>}</div></section></>}
+        <section className="panel"><div className="panel-head"><div><h3>Company evidence repository</h3><p>Upload certificates once; reuse them in future bid assessments.</p></div><label className={`primary upload-btn ${uploading?'disabled':''}`}><UploadCloud size={16}/> {uploading?'Uploading…':'Upload evidence'}<input type="file" multiple accept={fileAccept} disabled={uploading} onChange={e=>uploadCompanyEvidence(e.target.files)}/></label></div><div className="evidence-list">{docs.length?docs.map(d=><div className="evidence-row evidence-review-row" key={d.id}><FileText/><div className="evidence-info"><b>{d.title}</b><small>{d.category} · Uploaded {date(d.created_at)}</small>{d.reviewed_at && <small>Reviewed {dateTime(d.reviewed_at)} · {d.reviewed_by || 'Administrator'}{d.review_notes ? ` · ${d.review_notes}` : ''}</small>}{evidenceAudit.filter(a=>a.entity_id===d.id).map(a=><small key={a.id}>Audit: {a.event_type.replaceAll('_',' ')} · {dateTime(a.created_at)} · {a.details?.reviewer_email || a.actor_id || 'Administrator'}{a.details?.notes ? ` · ${a.details.notes}` : ''}</small>)}</div><span className={`tag ${d.verification_status==='verified'?'green':d.verification_status==='rejected'?'red':'amber'}`}>{d.verification_status}</span><div className="evidence-actions">{d.verification_status!=='verified' && <button className="secondary" onClick={()=>reviewEvidence(d.id,'verified')}>Verify</button>}{d.verification_status!=='rejected' && <button className="secondary" onClick={()=>reviewEvidence(d.id,'rejected')}>Reject</button>}<button className="icon-btn" title="Download" onClick={()=>downloadPrivateFile(d.storage_path,d.original_filename)}><Download size={16}/></button></div></div>):<div className="empty">No company evidence uploaded yet.</div>}</div></section></>}
       {page==='history' && <section className="panel"><div className="panel-head"><div><h3>Complete tender history</h3><p>Search, review and revisit previous qualification decisions.</p></div><div className="searchbox"><Search size={16}/><input placeholder="Search tender history" value={query} onChange={e=>setQuery(e.target.value)}/></div></div><TenderTable rows={filtered} onOpen={openTender}/></section>}
       {page==='tender-detail' && selected && <TenderWorkspace tender={selected} files={tenderFiles} analysis={analysis} compliance={compliance} uploading={uploading} analysing={analysing} reportUrl={reportUrl} onAnalyze={()=>runAnalysis(selected)} onBack={()=>setPage('tenders')} onUpload={uploadTenderFiles} onDownload={downloadPrivateFile} onUpdate={updateTender}/ >}
       <footer>Synergy Global Private Limited · Confidential · Administrator access only</footer>
