@@ -40,6 +40,16 @@ test("flags a verified turnover shortfall", () => {
 });
 
 test("does not apply a turnover test when the tender specifies none", () => {
-  const result = calculateFinancialEligibility([], {});
+  const result = calculateFinancialEligibility([], {}, []);
   assert.equal(result.status, "not_applicable");
+});
+
+test("ignores turnover rows whose linked certificate is not verified", () => {
+  const result = calculateFinancialEligibility([
+    row("FY 2025-26", 55_00_00_000, "verified", "unverified-proof"),
+    row("FY 2024-25", 26_00_00_000, "verified", "unverified-proof"),
+    row("FY 2023-24", 7_00_00_000, "verified", "unverified-proof"),
+  ], { required_average_turnover_inr: 20_00_00_000, turnover_years_required: 3 }, []);
+  assert.equal(result.status, "insufficient_evidence");
+  assert.equal(result.selected.length, 0);
 });
