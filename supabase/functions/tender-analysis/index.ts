@@ -2,6 +2,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.57.0";
 import { PDFDocument, StandardFonts, rgb } from "npm:pdf-lib@1.17.1";
 import { calculateFinancialEligibility } from "../_shared/financial.js";
+import { determineVerdict, collectMissingEvidence, restoreTenderAfterFailure } from "../_shared/analysis_rules.js";
 
 const allowedOrigins = (Deno.env.get("APP_ORIGIN") || "").split(",").map((value) => value.trim()).filter(Boolean);
 function corsHeaders(origin: string | null) {
@@ -156,24 +157,24 @@ Deno.serve(async (req: Request) => {
   const origin = req.headers.get("Origin");
   if (origin && !allowedOrigins.includes(origin)) return new Response("Origin not allowed.", { status: 403, headers: { "Vary": "Origin" } });
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders(origin) });
-  if (req.method !== "POST") return json({ error: "POST required." }, 405);
+  if (req.method !== "POST") return json({ error: "POST required." }, 405, origin);
   let runningTenderId: string | null = null;
   let previousTenderStatus: string | null = null;
   let actorId: string | null = null;
   try {
     const authorization = req.headers.get("Authorization") || "";
     const token = authorization.replace(/^Bearer\s+/i, "");
-    if (!token) return json({ error: "Authentication required." }, 401);
+    if (!token) return json({ error: "Authentication required." }, 401, origin);
     const supabaseUrl = Deno.env.get("SUPABASE_URL");
     if (!supabaseUrl) throw new Error("Missing SUPABASE_URL.");
     const adminClient = createClient(supabaseUrl, serviceKey(), { auth: { persistSession: false, autoRefreshToken: false } });
     const { data: authData, error: authError } = await adminClient.auth.getUser(token);
-    if (authError || !authData.user) return json({ error: "Invalid or expired session." }, 401);
+    if (authError || !authData.user) return json({ error: "Invalid or expired session." }, 401, origin);
     const userId = authData.user.id;
     actorId = userId;
     const { data: adminProfile, error: adminError } = await adminClient.from("admin_profiles")
       .select("user_id,is_active").eq("user_id", userId).eq("is_active", true).maybeSingle();
-    if (adminError || !adminProfile) return json({ error: "Synergy administrator access required." }, 403);
+    if (adminError || !adminProfile) return json({ error: "Synergy administrator access required." }, 403, origin);
     const body = await req.json();
     if (body.action === "review_evidence") {
       const evidenceId = String(body.evidence_id || "");
@@ -278,12 +279,8 @@ TENDER DOCUMENT TEXT (page-numbered where extraction could determine it): ${JSON
       gap_or_risk: financialChecks.join(" ") || null,
       recommended_action: financialStatus === "insufficient_evidence" ? "Upload and verify audited financial statements/CA certificates and link them to each financial year." : null,
     });
-    const mandatory = clauses.filter((c: any) => c.requirement_type === "mandatory" && c.status !== "not_applicable");
-    const hasFail = mandatory.some((c: any) => statusFromClause(c) === "fail");
-    const hasUnknown = mandatory.some((c: any) => ["missing_evidence", "clarification_required"].includes(statusFromClause(c)));
-    const hasConditional = mandatory.some((c: any) => statusFromClause(c) === "conditional");
-    const verdict = hasFail ? "not_eligible" : hasUnknown || financialStatus === "insufficient_evidence" ? "insufficient_evidence" : hasConditional ? "eligible_with_conditions" : "eligible";
-    const missing = [...new Set([...(ai.missing_evidence || []), ...financialChecks])];
+    const verdict = determineVerdict(clauses, financialStatus);
+    const missing = collectMissingEvidence(ai.missing_evidence || [], financialChecks);
     const report = {
       tender: { id: tender.id, title: tender.title, tender_reference: tender.tender_reference, procuring_entity: tender.procuring_entity, bid_value_inr: tender.bid_value_inr },
       verdict, executive_summary: ai.executive_summary || "", clauses, missing_evidence: missing,
@@ -333,10 +330,7 @@ TENDER DOCUMENT TEXT (page-numbered where extraction could determine it): ${JSON
     if (runningTenderId) {
       try {
         const restoreClient = createClient(Deno.env.get("SUPABASE_URL")!, serviceKey(), { auth: { persistSession: false, autoRefreshToken: false } });
-        const restore = await restoreClient.from("tenders").update({ status: previousTenderStatus || "uploaded" }).eq("id", runningTenderId);
-        if (restore.error) throw restore.error;
-        const audit = await restoreClient.from("audit_events").insert({ actor_id: actorId, event_type: "tender_analysis_failed", entity_type: "tender", entity_id: runningTenderId, details: { restored_status: previousTenderStatus || "uploaded", error: String(error).slice(0, 2000) } });
-        if (audit.error) throw audit.error;
+        await restoreTenderAfterFailure(restoreClient, runningTenderId, previousTenderStatus || "uploaded", actorId, error);
       } catch (restoreError) { console.error("CRITICAL: failed to restore tender status", runningTenderId, String(restoreError)); }
     }
     return json({ error: error instanceof Error ? error.message : "Unexpected analysis error." }, 500, origin);
